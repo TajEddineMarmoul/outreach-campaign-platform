@@ -8,8 +8,8 @@ those settings are not all managed by checked-in files.
 
 | Service | Configuration |
 | --- | --- |
-| Frontend | Vercel project `outreach-web`, rooted at `outreach_web/` |
-| API | Vercel project `outreach-api`, using root [server.py](../server.py) and [vercel.json](../vercel.json) |
+| Frontend | Vercel project `outreach-web`, rooted at `outreach_web/` ([production](https://www.outreachemails.online/)) |
+| API | Vercel project `outreach-api`, using root [server.py](../server.py) and [vercel.json](../vercel.json) ([production](https://api.outreachemails.online/)) |
 | Database | Supabase PostgreSQL shared by the API and worker |
 | Worker invocation | Supabase `pg_cron` and `pg_net` call `POST /internal/worker/tick` once per minute |
 

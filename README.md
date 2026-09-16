@@ -40,6 +40,11 @@ or [interactive API reference](http://127.0.0.1:8000/docs).
 The launchers leave the delivery worker off. Keep the local delivery lock enabled
 and automatic migrations disabled as shown in [.env.example](.env.example).
 
+## Production
+
+Open the [production app](https://www.outreachemails.online/), [API health check](https://api.outreachemails.online/health),
+or [interactive API reference](https://api.outreachemails.online/docs).
+
 ## How delivery works
 
 1. The frontend sends authenticated requests through its server-side API proxy.
