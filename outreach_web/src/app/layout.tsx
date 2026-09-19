@@ -3,6 +3,8 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import AuthLayout from "@/components/AuthLayout";
 import AuthProvider from "@/components/AuthProvider";
+import GoogleAnalytics from "@/components/GoogleAnalytics";
+import { SITE_DESCRIPTION, SITE_NAME, SITE_URL } from "@/lib/site";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -16,8 +18,17 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Outreach Campaign Manager",
-  description: "Simple premium campaign outreach app",
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: "Outreach | Personalized Email Outreach Made Simple",
+    template: "%s | Outreach",
+  },
+  description: SITE_DESCRIPTION,
+  applicationName: SITE_NAME,
+  robots: {
+    index: false,
+    follow: false,
+  },
 };
 
 export default function RootLayout({
@@ -36,6 +47,7 @@ export default function RootLayout({
             <AuthLayout>{children}</AuthLayout>
           </AuthProvider>
         </ClerkProvider>
+        <GoogleAnalytics />
       </body>
     </html>
   );
