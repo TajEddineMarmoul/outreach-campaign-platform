@@ -25,6 +25,9 @@ export const metadata: Metadata = {
   },
   description: SITE_DESCRIPTION,
   applicationName: SITE_NAME,
+  verification: {
+    google: "VLcxlSzNkOPCmWE9PimwNeDpIvgbghWvNx8yWrPOUd8",
+  },
   robots: {
     index: false,
     follow: false,
