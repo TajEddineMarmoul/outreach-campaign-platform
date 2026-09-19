@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { ArrowRight, CheckCheck, Mail, Users } from "lucide-react";
 import { AppDialog } from "@/components/app-ui";
+import { trackEventOnce } from "@/lib/analytics";
 import { completeWelcome, showCampaignTips, hideCampaignTips } from "@/lib/onboarding";
 import "./onboarding.css";
 
@@ -19,6 +20,11 @@ export default function WelcomePage() {
   const router = useRouter();
   const [sampleOpen, setSampleOpen] = useState(false);
   const [guide, setGuide] = useState(true);
+
+  useEffect(() => {
+    if (!userId) return;
+    trackEventOnce(`${userId}:sign-up-complete`, "sign_up_complete");
+  }, [userId]);
 
   const leaveWelcome = (create: boolean) => {
     if (!userId) return;

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 import { checkResponse, errorMessage, useApiClient } from "@/lib/api";
+import { trackEvent } from "@/lib/analytics";
 import {
   ActionMenu,
   AppDialog,
@@ -128,6 +129,12 @@ export default function ContactsPage() {
           body,
         }),
       );
+      if (result.imported) {
+        trackEvent("contacts_imported", {
+          contact_count: result.imported,
+          import_source: "contact_library_csv",
+        });
+      }
       setDialog(null);
       setFile(null);
       setMessage(

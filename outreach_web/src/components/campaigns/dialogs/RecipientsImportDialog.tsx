@@ -6,6 +6,7 @@ import { ArrowLeft, ArrowRight, CheckCircle, Link as LinkIcon, Loader2, Plus, Up
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useApiClient } from "@/lib/api";
+import { trackEvent } from "@/lib/analytics";
 
 type Method = "paste" | "csv" | "sheet";
 const MAX_CSV_FILE_BYTES = 100 * 1024 * 1024;
@@ -136,7 +137,19 @@ function ImportForm({ onClose, campaignId, onImported }: Props) {
       if (isPreview) {
         setPreview(data as ImportPreview);
       } else {
-        setComplete(Number(data.attached || 0));
+        const attached = Number(data.attached || 0);
+        setComplete(attached);
+        if (attached > 0) {
+          trackEvent("contacts_imported", {
+            contact_count: attached,
+            import_source:
+              method === "sheet"
+                ? activeSheets.length > 1
+                  ? "google_sheets_batch"
+                  : "google_sheet"
+                : method,
+          });
+        }
         setUploadedCsvs(null);
         try {
           await onImported();

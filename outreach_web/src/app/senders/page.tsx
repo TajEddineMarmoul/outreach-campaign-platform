@@ -11,6 +11,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { checkResponse, errorMessage, useApiClient } from "@/lib/api";
+import { trackEventOnce } from "@/lib/analytics";
 import type { Sender, SenderGroup } from "@/types/senders";
 import {
   ActionMenu,
@@ -83,6 +84,14 @@ function SendersContent() {
   const [message, setMessage] = useState("");
   useEffect(() => {
     if (params.get("oauth")) {
+      if (params.get("oauth") === "success") {
+        const senderId = params.get("sender_id") || "connected";
+        trackEventOnce(
+          `sender:${senderId}:connected`,
+          "sender_connected",
+          { connection_method: "gmail_oauth" },
+        );
+      }
       window.sessionStorage.removeItem("pending_sender_group_id");
       void mutate();
     }

@@ -65,6 +65,7 @@ import LogsSection from "@/components/campaigns/LogsSection";
 import ProgressSection from "@/components/campaigns/ProgressSection";
 import RecipientsSection from "@/components/campaigns/RecipientsSection";
 import { API_URL, responseProblem, useApiClient } from "@/lib/api";
+import { trackEvent } from "@/lib/analytics";
 import {
   extractTemplateVariables,
   templateVariableName,
@@ -889,6 +890,11 @@ function CampaignEditor() {
             "The campaign could not launch. Please try again.",
           ),
         );
+      if (!schedule.draft.dryRun) {
+        trackEvent("campaign_launched", {
+          delivery_mode: schedule.draft.mode,
+        });
+      }
       // An accepted launch must not look failed if the subsequent refresh is unavailable.
       await mutate(
         `${API_URL}/api/campaigns/${campaignId}`,
