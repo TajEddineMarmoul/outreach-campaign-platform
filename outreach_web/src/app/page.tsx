@@ -3,7 +3,9 @@ import ProductHome from "@/components/home/ProductHome";
 import { SITE_DESCRIPTION, SITE_NAME, SITE_URL } from "@/lib/site";
 
 export const metadata: Metadata = {
-  title: "Personalized Email Outreach Made Simple",
+  title: {
+    absolute: "Outreach | Personalized Email Outreach Made Simple",
+  },
   description: SITE_DESCRIPTION,
   alternates: {
     canonical: "/",
