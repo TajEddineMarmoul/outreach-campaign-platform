@@ -49,7 +49,7 @@ cd ..
 | `outreach_web/.env.local` | Clerk publishable and secret keys, `LOCAL_DEV_USER_ID`, `BACKEND_URL` |
 
 For local authentication, set `APP_ENV=development`, use the same Clerk user ID
-as `LOCAL_DEV_USER_ID` in both files, and leave `APP_ACCESS_TOKEN` empty in both.
+as `LOCAL_DEV_USER_ID` in both files, and leave `BACKEND_IDENTITY_SECRET` empty in both.
 The frontend verifies that the signed-in account matches that ID.
 
 Keep these backend values for local UI and API work:
@@ -132,9 +132,9 @@ keep those overrides in the test process, separate from the local server.
 | Symptom | Check |
 | --- | --- |
 | `DATABASE_URL is required` | Set it in the root `.env`; `APP_DATABASE_URL` alone does not configure the compatibility layer. |
-| Backend connection is not configured | Set the frontend's `BACKEND_URL` and either local user ID or shared API token. |
+| Backend connection is not configured | Set the frontend's `BACKEND_URL` and either local user ID or the shared `BACKEND_IDENTITY_SECRET`. |
 | Configured for a different account | Sign in with the Clerk account matching `LOCAL_DEV_USER_ID`. |
-| Invalid authentication token | Remove placeholder `APP_ACCESS_TOKEN` values when using local mode, or match the real token across both services. |
+| Invalid authentication token | Confirm that the frontend and API use the same `BACKEND_IDENTITY_SECRET` in production, or use the configured local user ID locally. |
 | Encrypted credentials cannot be decrypted | Use the database's original `APP_ENCRYPTION_KEY`. |
 | Missing table or column | Check the database revision against the [migration guide](deployment.md#database-upgrades). |
 | Delivery is locked | Expected in local mode; use mocked delivery tests for development. |

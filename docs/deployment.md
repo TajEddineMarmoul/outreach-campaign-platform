@@ -27,8 +27,7 @@ Provider pricing, quotas, and account-specific domains are managed outside this 
 | `APP_ENV=production` | Enforce production database, encryption, and authentication behavior. |
 | `DATABASE_URL` | PostgreSQL connection string used by both data-access layers. |
 | `APP_ENCRYPTION_KEY` | Stable key for encrypted Gmail sender credentials; API and worker must match. |
-| `APP_ACCESS_TOKEN` | Private token added by the frontend proxy. |
-| `APP_USER_ID` | Database workspace owner returned for that token. |
+| `BACKEND_IDENTITY_SECRET` | A 32+-character random secret shared with the frontend. The frontend uses it to sign a short-lived assertion containing the Clerk user ID; the API verifies it before accessing that user's data. |
 | `BACKEND_URL` | Public API origin, also used for the Gmail OAuth callback. |
 | `TRACKING_BASE_URL` | Optional public API origin used in open-pixel and click-redirect links. Defaults to `BACKEND_URL`; set it only when tracking should use a separate public domain. |
 | `FRONTEND_URL` | Frontend origin used after OAuth completes. |
@@ -52,15 +51,31 @@ callback is `BACKEND_URL` followed by `/api/oauth/callback`.
 | --- | --- |
 | `APP_ENV=production` | Disable the local user-ID authentication path. |
 | `BACKEND_URL` | API origin targeted by the server-side proxy. |
-| `APP_ACCESS_TOKEN` | Same private token as the API. |
+| `BACKEND_IDENTITY_SECRET` | Same private secret as the API. It remains server-only and signs a request for the currently authenticated Clerk user. |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk browser configuration. |
 | `CLERK_SECRET_KEY` | Matching Clerk server credential. |
 | `NEXT_PUBLIC_API_URL` | Optional public base used to construct API URLs; `useApiClient()` maps matching requests through the proxy. |
 
 Keep private credentials out of `NEXT_PUBLIC_` variables. Clerk verifies browser
-sessions; the proxy adds the API token on the server. In shared-token mode, signed-in
-users reach the workspace identified by `APP_USER_ID`. Account access must reflect
-that shared-workspace behavior.
+sessions; the proxy then signs an assertion for that specific Clerk user on the
+server. The API rejects shared bearer-token access in production, so each signed-in
+user reaches only the workspace keyed by their own Clerk user ID.
+
+### Required tenant-isolation release
+
+This release can safely use the existing `APP_ACCESS_TOKEN` as a one-release
+compatibility source for the signing key, so the API and frontend can be deployed
+without an access gap. It is no longer accepted as a bearer credential. Immediately
+afterward, set the same new `BACKEND_IDENTITY_SECRET` on both Vercel projects and
+remove `APP_ACCESS_TOKEN` and `APP_USER_ID` from both projects. Generate the secret
+with a cryptographically secure password generator (at least 32 random characters).
+The API intentionally fails closed if neither secret is configured.
+
+Earlier versions stored the production owner's records under an email address while
+new code uses the immutable Clerk user ID. Before or immediately after this release,
+run `python scripts/migrate_legacy_user_id.py --from-user-id <old-email> --to-user-id
+<clerk-user-id> --dry-run`, review the counts, then run it again with `--apply`.
+The script refuses to merge into a Clerk user ID that already has records.
 
 ### Optional Gmail activity synchronization
 

@@ -13,8 +13,8 @@ npm ci
 ```
 
 Copy [.env.example](.env.example) to `.env.local`, then fill in the Clerk keys
-and the same `LOCAL_DEV_USER_ID` configured on the API. Keep `APP_ACCESS_TOKEN`
-empty when using this local authentication mode. Next.js reads its own
+and the same `LOCAL_DEV_USER_ID` configured on the API. Keep
+`BACKEND_IDENTITY_SECRET` empty when using this local authentication mode. Next.js reads its own
 environment file; the repository-root `.env` is for the backend.
 
 ```bash
@@ -49,7 +49,7 @@ authenticated application pages to load data.
 | Global and campaign styles | [globals.css](src/app/globals.css) and [campaign-workspace.css](src/components/campaigns/workspace/campaign-workspace.css) |
 
 Use `useApiClient()` for API mutations so requests pass through the authenticated
-proxy. `BACKEND_URL`, `APP_ACCESS_TOKEN`, and `CLERK_SECRET_KEY` stay server-side;
+proxy. `BACKEND_URL`, `BACKEND_IDENTITY_SECRET`, and `CLERK_SECRET_KEY` stay server-side;
 only variables beginning with `NEXT_PUBLIC_` are intended for browser code.
 
 For UI changes, check keyboard operation, loading and error states, and narrow

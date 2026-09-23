@@ -1,4 +1,5 @@
 import { auth } from "@clerk/nextjs/server";
+import { createHmac } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -13,12 +14,14 @@ async function proxyRequest(
     return NextResponse.json({ detail: "Authentication required" }, { status: 401 });
   }
 
-  const apiToken = process.env.APP_ACCESS_TOKEN || "";
   const localDevUserId = process.env.LOCAL_DEV_USER_ID || "";
+  // APP_ACCESS_TOKEN is a one-release compatibility source for the signing
+  // key. It is no longer sent as a bearer credential to the API.
+  const backendIdentitySecret = process.env.BACKEND_IDENTITY_SECRET || process.env.APP_ACCESS_TOKEN || "";
   const isLocalDevelopment =
-    process.env.APP_ENV !== "production" && Boolean(localDevUserId) && !apiToken;
+    process.env.APP_ENV !== "production" && Boolean(localDevUserId);
   const backendUrl = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || "";
-  if ((!apiToken && !isLocalDevelopment) || !backendUrl) {
+  if ((!backendIdentitySecret && !isLocalDevelopment) || !backendUrl) {
     return NextResponse.json({ detail: "Backend connection is not configured" }, { status: 503 });
   }
   if (isLocalDevelopment && userId !== localDevUserId) {
@@ -37,7 +40,18 @@ async function proxyRequest(
   headers.delete("cookie");
   headers.delete("host");
   headers.delete("content-length");
-  headers.set("authorization", `Bearer ${apiToken || `local_dev_${localDevUserId}`}`);
+  if (isLocalDevelopment) {
+    headers.set("authorization", `Bearer local_dev_${localDevUserId}`);
+  } else {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const identityPayload = [timestamp, request.method.toUpperCase(), target.pathname, userId].join("\n");
+    const signature = createHmac("sha256", backendIdentitySecret)
+      .update(identityPayload, "utf8")
+      .digest("hex");
+    headers.set("x-backend-user-id", userId);
+    headers.set("x-backend-auth-timestamp", timestamp);
+    headers.set("x-backend-auth-signature", signature);
+  }
 
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
   let backendResponse: Response;
