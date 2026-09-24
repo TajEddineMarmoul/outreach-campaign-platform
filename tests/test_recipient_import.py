@@ -75,11 +75,11 @@ def test_private_blob_csv_batch_import_uses_original_filenames_and_removes_files
     captured = {}
     sources = [
         campaigns.RecipientBlobCsv(
-            url="https://store.private.blob.vercel-storage.com/campaign-imports/21/design.csv",
+            url="https://store.private.blob.vercel-storage.com/campaign-imports/user-1/21/design.csv",
             filename="design.csv",
         ),
         campaigns.RecipientBlobCsv(
-            url="https://store.private.blob.vercel-storage.com/campaign-imports/21/engineering.csv",
+            url="https://store.private.blob.vercel-storage.com/campaign-imports/user-1/21/engineering.csv",
             filename="engineering.csv",
         ),
     ]
@@ -88,7 +88,7 @@ def test_private_blob_csv_batch_import_uses_original_filenames_and_removes_files
     monkeypatch.setattr(
         campaigns,
         "read_recipient_blob_csvs",
-        lambda received_sources, campaign_id: [
+        lambda received_sources, campaign_id, user_id: [
             pd.DataFrame([{"email": "alex@example.com"}]),
             pd.DataFrame([{"email": "sam@example.com"}]),
         ],
@@ -109,7 +109,7 @@ def test_private_blob_csv_batch_import_uses_original_filenames_and_removes_files
 
 def test_private_blob_csv_batch_enforces_total_size(monkeypatch):
     source = campaigns.RecipientBlobCsv(
-        url="https://store.private.blob.vercel-storage.com/campaign-imports/21/contacts.csv",
+        url="https://store.private.blob.vercel-storage.com/campaign-imports/user-1/21/contacts.csv",
         filename="contacts.csv",
     )
     monkeypatch.setattr(
@@ -119,7 +119,7 @@ def test_private_blob_csv_batch_enforces_total_size(monkeypatch):
     )
 
     with pytest.raises(HTTPException, match="200 MB"):
-        campaigns.read_recipient_blob_csvs([source], campaign_id=21)
+        campaigns.read_recipient_blob_csvs([source], campaign_id=21, user_id="user-1")
 
 
 def test_imported_contacts_are_approved_and_keep_every_csv_field(monkeypatch):
@@ -300,6 +300,48 @@ def test_google_sheet_timeout_returns_a_controlled_http_error(monkeypatch):
     assert response.status_code == 504
     assert response.json()["detail"] == "Google Sheets did not respond within 120 seconds"
     assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_google_sheet_import_rejects_non_google_urls_without_fetching(monkeypatch):
+    monkeypatch.setattr(
+        campaigns,
+        "get_public_sheet_csv",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not fetch")),
+    )
+
+    with pytest.raises(HTTPException, match="docs.google.com") as error:
+        campaigns.read_recipient_sheet(
+            campaigns.RecipientsGoogleSheet(
+                url="http://169.254.169.254/latest/meta-data/?format=csv",
+                tab_name="",
+                header_row=1,
+                mapping={},
+            )
+        )
+
+    assert error.value.status_code == 422
+
+
+def test_published_google_sheet_rebuilds_a_trusted_export_url(monkeypatch):
+    captured = {}
+
+    def read_published(sheet_id, *, gid, header_row):
+        captured.update({"sheet_id": sheet_id, "gid": gid, "header_row": header_row})
+        return pd.DataFrame([{"email": "alex@example.com"}])
+
+    monkeypatch.setattr(campaigns, "get_published_csv", read_published)
+
+    frame = campaigns.read_recipient_sheet(
+        campaigns.RecipientsGoogleSheet(
+            url="https://docs.google.com/spreadsheets/d/e/published-sheet/pub?output=csv&gid=17",
+            tab_name="",
+            header_row=2,
+            mapping={},
+        )
+    )
+
+    assert list(frame.columns) == ["email"]
+    assert captured == {"sheet_id": "published-sheet", "gid": "17", "header_row": 2}
 
 
 def test_add_one_existing_contact_preserves_saved_fields(monkeypatch):

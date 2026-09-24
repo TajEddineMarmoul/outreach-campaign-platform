@@ -42,7 +42,7 @@ def test_build_message_html():
     assert msg.get_content_type() == "text/html"
     assert "<p>Hello <b>world</b></p>" in msg.get_payload()
 
-def test_build_message_with_attachment(tmp_path):
+def test_build_message_ignores_legacy_attachment_path(tmp_path):
     # Create a dummy attachment
     dummy_pdf = tmp_path / "test.pdf"
     dummy_pdf.write_bytes(b"%PDF-1.4 dummy content")
@@ -58,18 +58,8 @@ def test_build_message_with_attachment(tmp_path):
     msg_bytes = base64.urlsafe_b64decode(raw_msg["raw"].encode("ascii"))
     msg = email.message_from_bytes(msg_bytes)
     
-    assert msg.is_multipart()
-    
-    parts = list(msg.walk())
-    assert len(parts) >= 3 # multipart, text, application/pdf
-    
-    pdf_part = None
-    for part in parts:
-        if part.get_content_type() == "application/pdf":
-            pdf_part = part
-            
-    assert pdf_part is not None
-    assert pdf_part.get_filename() == "test.pdf"
+    assert not msg.is_multipart()
+    assert msg.get_content_type() == "text/plain"
 
 
 def test_build_message_with_stored_attachment():

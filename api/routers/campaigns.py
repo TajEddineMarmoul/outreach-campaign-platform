@@ -17,12 +17,12 @@ import requests
 from io import StringIO
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from api.deps import PROJECT_ROOT, db, config_path, get_db, get_current_user_id
+from api.deps import db, config_path, get_db, get_current_user_id
 from api.delivery_safety import require_delivery_enabled
 from api.schemas import (
     CampaignCreate,
@@ -59,7 +59,6 @@ MAX_CAMPAIGN_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_RECIPIENT_IMPORT_BYTES = 100 * 1024 * 1024
 MAX_RECIPIENT_IMPORT_BATCH_BYTES = 200 * 1024 * 1024
 PRIVATE_IMPORT_BLOB_HOST_SUFFIX = ".private.blob.vercel-storage.com"
-PRIVATE_IMPORT_BLOB_PATH_PREFIX = "/campaign-imports/"
 ALLOWED_ATTACHMENT_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".txt", ".doc", ".docx"}
 
 
@@ -122,6 +121,7 @@ def list_campaigns(conn=Depends(get_db), user_id: str = Depends(get_current_user
     result = []
     for row in campaigns:
         d = dict(row)
+        d["attachment_path"] = ""
         counts = conn.execute(
             """
             SELECT
@@ -170,6 +170,7 @@ def get_campaign(campaign_id: int, conn=Depends(get_db), user_id: str = Depends(
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     res = dict(campaign)
+    res["attachment_path"] = ""
     res["require_attachment"] = db.get_setting(conn, f"campaign_{campaign_id}_require_attachment", "false", user_id) == "true"
     res["tracking_enabled"] = db.get_setting(conn, f"campaign_{campaign_id}_tracking_enabled", "true", user_id) == "true"
     res["unsubscribe_link"] = db.get_setting(conn, f"campaign_{campaign_id}_unsubscribe_link", "true", user_id) == "true"
@@ -183,7 +184,7 @@ def update_campaign(campaign_id: int, req: CampaignUpdate, conn=Depends(get_db),
     subject = req.subject_template if req.subject_template is not None else str(campaign["subject_template"])
     body = req.body_template if req.body_template is not None else str(campaign["body_template"])
     fallback = req.fallback_body_template if req.fallback_body_template is not None else str(campaign["fallback_body_template"])
-    attachment = req.attachment_path if req.attachment_path is not None else str(campaign["attachment_path"] or "")
+    attachment = ""
 
     db.update_campaign_name(conn, campaign_id, user_id, name)
     db.update_campaign(conn, campaign_id, user_id, subject, body, fallback, attachment)
@@ -313,11 +314,6 @@ def get_campaign_summary(campaign_id: int, conn=Depends(get_db), user_id: str = 
     if len(attachments) > 1:
         att_label = f"{len(attachments)} attachments"
     if not att_label:
-        att_path = str(campaign["attachment_path"] or "")
-        att_resolved = db.resolve_project_path(att_path) if att_path else None
-        if att_resolved and att_resolved.exists():
-            att_label = Path(att_path).name
-    if not att_label:
         att_label = "none"
 
     schedule_label = "not set"
@@ -368,7 +364,7 @@ def patch_composer(campaign_id: int, req: ComposerUpdate, conn=Depends(get_db), 
         req.subject_template,
         req.body_template,
         req.fallback_body_template,
-        str(campaign["attachment_path"] or ""),
+        "",
     )
     db.set_setting(conn, f"campaign_{campaign_id}_require_attachment", "true" if req.require_attachment else "false", user_id)
     
@@ -617,21 +613,26 @@ async def read_recipient_csv_upload(file: UploadFile) -> pd.DataFrame:
     return read_recipient_text(raw)
 
 
-def validate_recipient_blob_url(url: str, campaign_id: int) -> None:
+def validate_recipient_blob_url(url: str, campaign_id: int, user_id: str) -> None:
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").lower()
+    path_parts = parsed.path.split("/")
     if (
         parsed.scheme != "https"
         or parsed.query
         or parsed.fragment
         or not hostname.endswith(PRIVATE_IMPORT_BLOB_HOST_SUFFIX)
-        or not parsed.path.startswith(f"{PRIVATE_IMPORT_BLOB_PATH_PREFIX}{campaign_id}/")
+        or len(path_parts) != 5
+        or path_parts[1] != "campaign-imports"
+        or path_parts[2] != user_id
+        or path_parts[3] != str(campaign_id)
+        or not path_parts[4].lower().endswith(".csv")
     ):
         raise HTTPException(status_code=422, detail="The uploaded CSV is not a valid private import file")
 
 
-def read_recipient_blob_csv(source: RecipientBlobCsv, campaign_id: int) -> tuple[pd.DataFrame, int]:
-    validate_recipient_blob_url(source.url, campaign_id)
+def read_recipient_blob_csv(source: RecipientBlobCsv, campaign_id: int, user_id: str) -> tuple[pd.DataFrame, int]:
+    validate_recipient_blob_url(source.url, campaign_id, user_id)
     token = os.getenv("BLOB_READ_WRITE_TOKEN", "")
     if not token:
         raise HTTPException(status_code=503, detail="Large CSV imports are not configured. Please try again shortly.")
@@ -663,11 +664,11 @@ def read_recipient_blob_csv(source: RecipientBlobCsv, campaign_id: int) -> tuple
     return read_recipient_text(raw), len(content)
 
 
-def read_recipient_blob_csvs(sources: list[RecipientBlobCsv], campaign_id: int) -> list[pd.DataFrame]:
+def read_recipient_blob_csvs(sources: list[RecipientBlobCsv], campaign_id: int, user_id: str) -> list[pd.DataFrame]:
     frames: list[pd.DataFrame] = []
     total_bytes = 0
     for source in sources:
-        frame, source_bytes = read_recipient_blob_csv(source, campaign_id)
+        frame, source_bytes = read_recipient_blob_csv(source, campaign_id, user_id)
         total_bytes += source_bytes
         if total_bytes > MAX_RECIPIENT_IMPORT_BATCH_BYTES:
             raise HTTPException(status_code=422, detail="The CSV batch exceeds the 200 MB total limit")
@@ -750,7 +751,7 @@ def post_recipients_blob_csv_batch(
     user_id: str = Depends(get_current_user_id),
 ):
     require_editable_campaign(conn, campaign_id, user_id)
-    frames = read_recipient_blob_csvs(req.files, campaign_id)
+    frames = read_recipient_blob_csvs(req.files, campaign_id, user_id)
     result = import_and_attach_frames(
         conn,
         campaign_id,
@@ -805,10 +806,10 @@ def read_recipient_sheet(req: RecipientsGoogleSheet) -> pd.DataFrame:
         raise HTTPException(status_code=400, detail="Private Google Sheets import is not supported. Use a public or published sheet link.")
     
     try:
-        if "output=csv" in sheet_url or "/pub?" in sheet_url or "format=csv" in sheet_url:
-            df = get_published_csv(sheet_url, header_row=header_row)
+        sheet = parse_google_sheet_url_details(sheet_url)
+        if sheet.published:
+            df = get_published_csv(sheet.sheet_id, gid=sheet.gid, header_row=header_row)
         else:
-            sheet = parse_google_sheet_url_details(sheet_url)
             df = get_public_sheet_csv(
                 sheet.sheet_id,
                 gid=sheet.gid,
@@ -891,7 +892,7 @@ def preview_recipients_blob_csv_batch(
     user_id: str = Depends(get_current_user_id),
 ):
     require_editable_campaign(conn, campaign_id, user_id)
-    return preview_recipient_frames([(frame, None) for frame in read_recipient_blob_csvs(req.files, campaign_id)])
+    return preview_recipient_frames([(frame, None) for frame in read_recipient_blob_csvs(req.files, campaign_id, user_id)])
 
 
 @router.post("/api/campaigns/{campaign_id}/recipients/preview/google-sheet")
@@ -1234,10 +1235,14 @@ def get_campaign_logs(campaign_id: int, conn=Depends(get_db), user_id: str = Dep
 
 @router.get("/api/campaigns/{campaign_id}/logs/export")
 def get_logs_export(campaign_id: int, conn=Depends(get_db), user_id: str = Depends(get_current_user_id)):
+    if not db.get_campaign(conn, campaign_id, user_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
     log = send_log_dataframe(conn, user_id=user_id, campaign_id=campaign_id)
-    temp_file = PROJECT_ROOT / "data" / f"campaign_{campaign_id}_log.csv"
-    log.to_csv(temp_file, index=False)
-    return FileResponse(path=str(temp_file), filename=f"campaign_{campaign_id}_send_log.csv", media_type="text/csv")
+    return StreamingResponse(
+        iter([log.to_csv(index=False)]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="campaign_{campaign_id}_send_log.csv"'},
+    )
 
 
 # ----------------------------------------------------
@@ -1245,7 +1250,7 @@ def get_logs_export(campaign_id: int, conn=Depends(get_db), user_id: str = Depen
 # ----------------------------------------------------
 
 @router.get("/api/google-sheets/public-tabs")
-def get_public_google_sheet_tabs(url: str = Query(...)):
+def get_public_google_sheet_tabs(url: str = Query(...), _user_id: str = Depends(get_current_user_id)):
     try:
         return {"tabs": list_public_sheet_tabs(url)}
     except Exception as exc:

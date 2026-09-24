@@ -23,8 +23,8 @@ def test_add_campaign_recipients_does_not_require_sqlite_total_changes(tmp_path:
 
     wrapped = NoTotalChangesConnection(conn)
 
-    assert db.add_campaign_recipients(wrapped, campaign_id, [contact["id"]]) == 1
-    assert db.add_campaign_recipients(wrapped, campaign_id, [contact["id"]]) == 0
+    assert db.add_campaign_recipients(wrapped, campaign_id, [contact["id"]], user_id) == 1
+    assert db.add_campaign_recipients(wrapped, campaign_id, [contact["id"]], user_id) == 0
 
 
 def test_set_contacts_status_does_not_require_sqlite_total_changes(tmp_path: Path):

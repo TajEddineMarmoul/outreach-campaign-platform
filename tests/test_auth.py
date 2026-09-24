@@ -28,21 +28,32 @@ def request(method: str = "GET", path: str = "/api/campaigns", headers: dict[str
     )
 
 
-def signed_request(secret: str, user_id: str, *, method: str = "GET", path: str = "/api/campaigns", timestamp: int | None = None) -> Request:
+def signed_request(
+    secret: str,
+    user_id: str,
+    *,
+    method: str = "GET",
+    path: str = "/api/campaigns",
+    timestamp: int | None = None,
+    role: str | None = None,
+) -> Request:
     value = str(int(time.time()) if timestamp is None else timestamp)
     signature = hmac.new(
         secret.encode(),
-        auth._identity_message(timestamp=value, method=method, path=path, user_id=user_id),
+        auth._identity_message(timestamp=value, method=method, path=path, user_id=user_id, role=role or auth.ROLE_MEMBER),
         hashlib.sha256,
     ).hexdigest()
+    headers = {
+        "x-backend-user-id": user_id,
+        "x-backend-auth-timestamp": value,
+        "x-backend-auth-signature": signature,
+    }
+    if role:
+        headers["x-backend-user-role"] = role
     return request(
         method,
         path,
-        {
-            "x-backend-user-id": user_id,
-            "x-backend-auth-timestamp": value,
-            "x-backend-auth-signature": signature,
-        },
+        headers,
     )
 
 
@@ -134,4 +145,29 @@ def test_local_development_identity_is_rejected_in_production(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         auth.get_current_user_id(request(), credentials("local_dev_production-user"))
 
+    assert exc_info.value.status_code == 401
+
+
+def test_admin_role_must_be_cryptographically_bound_to_the_request(monkeypatch):
+    monkeypatch.setattr(auth, "BACKEND_IDENTITY_SECRET", "unit-test-secret")
+    monkeypatch.setattr(auth, "IS_PRODUCTION", True)
+
+    admin = auth.get_current_principal(
+        signed_request("unit-test-secret", "user_admin", role=auth.ROLE_ADMIN)
+    )
+    assert auth.require_admin_user(admin) == "user_admin"
+
+    member = auth.get_current_principal(signed_request("unit-test-secret", "user_member"))
+    with pytest.raises(HTTPException) as exc_info:
+        auth.require_admin_user(member)
+    assert exc_info.value.status_code == 403
+
+    member_request = signed_request("unit-test-secret", "user_member")
+    forged = request(
+        "GET",
+        "/api/campaigns",
+        {**dict(member_request.headers), "x-backend-user-role": "admin"},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        auth.get_current_principal(forged)
     assert exc_info.value.status_code == 401

@@ -14,7 +14,6 @@ class CampaignUpdate(BaseModel):
     subject_template: Optional[str] = None
     body_template: Optional[str] = None
     fallback_body_template: Optional[str] = None
-    attachment_path: Optional[str] = None
     require_attachment: Optional[bool] = None
     tracking_enabled: Optional[bool] = None
     unsubscribe_link: Optional[bool] = None

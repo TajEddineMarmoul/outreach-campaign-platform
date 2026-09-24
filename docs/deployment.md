@@ -31,6 +31,7 @@ Provider pricing, quotas, and account-specific domains are managed outside this 
 | `BACKEND_URL` | Public API origin, also used for the Gmail OAuth callback. |
 | `TRACKING_BASE_URL` | Optional public API origin used in open-pixel and click-redirect links. Defaults to `BACKEND_URL`; set it only when tracking should use a separate public domain. |
 | `FRONTEND_URL` | Frontend origin used after OAuth completes. |
+| `CORS_ALLOW_ORIGIN_REGEX` | Optional allowlist for browser origins. If omitted, production allows only `https://www.outreachemails.online`. |
 | `RUN_DATABASE_MIGRATIONS=false` | Keep API startup migrations off; upgrade explicitly. |
 | `OUTREACH_SAFE_LOCAL_MODE=false` | Allow the hosted delivery runtime to process jobs. |
 | `WORKER_TICK_TOKEN` | Secret required in the tick request's `X-Worker-Token` header. |
@@ -60,6 +61,15 @@ Keep private credentials out of `NEXT_PUBLIC_` variables. Clerk verifies browser
 sessions; the proxy then signs an assertion for that specific Clerk user on the
 server. The API rejects shared bearer-token access in production, so each signed-in
 user reaches only the workspace keyed by their own Clerk user ID.
+
+### Administrator-only Gmail client configuration
+
+The shared Gmail OAuth client configuration is global, not tenant data. The API
+accepts changes to it only when the proxy has retrieved the current Clerk user on
+the server and found `publicMetadata.role` set to `admin`. The role is included in
+the proxy's short-lived request signature, so changing browser-side state cannot
+grant access. Assign or remove this metadata only through Clerk's server-side
+Dashboard/API controls; do not rely on hiding the settings screen in the browser.
 
 ### Required tenant-isolation release
 

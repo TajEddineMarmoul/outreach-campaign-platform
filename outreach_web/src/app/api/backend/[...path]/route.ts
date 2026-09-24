@@ -1,4 +1,4 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { createHmac } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -43,12 +43,19 @@ async function proxyRequest(
   if (isLocalDevelopment) {
     headers.set("authorization", `Bearer local_dev_${localDevUserId}`);
   } else {
+    // Client-side metadata is only a UI hint. Ask Clerk from the server for
+    // the one global-configuration route, then bind that result to the HMAC
+    // assertion so it cannot be forged or replayed as an admin request.
+    const needsAdminRole = ["/api/oauth/status", "/api/oauth/save-credentials-json"].includes(target.pathname);
+    const clerkUser = needsAdminRole ? await currentUser() : null;
+    const role = clerkUser?.publicMetadata?.role === "admin" ? "admin" : "member";
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    const identityPayload = [timestamp, request.method.toUpperCase(), target.pathname, userId].join("\n");
+    const identityPayload = [timestamp, request.method.toUpperCase(), target.pathname, userId, role].join("\n");
     const signature = createHmac("sha256", backendIdentitySecret)
       .update(identityPayload, "utf8")
       .digest("hex");
     headers.set("x-backend-user-id", userId);
+    headers.set("x-backend-user-role", role);
     headers.set("x-backend-auth-timestamp", timestamp);
     headers.set("x-backend-auth-signature", signature);
   }

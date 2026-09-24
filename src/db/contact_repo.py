@@ -89,14 +89,15 @@ def add_campaign_recipients(
     conn: sqlite3.Connection,
     campaign_id: int,
     contact_ids: Iterable[int],
+    user_id: str = "default_user",
 ) -> int:
     now = utcnow_iso()
     attached = 0
     for contact_id in contact_ids:
         normalized_contact_id = int(contact_id)
         contact = conn.execute(
-            "SELECT status FROM contacts WHERE id = ?",
-            (normalized_contact_id,),
+            "SELECT status FROM contacts WHERE id = ? AND user_id = ?",
+            (normalized_contact_id, user_id),
         ).fetchone()
         if not contact:
             continue
@@ -104,8 +105,8 @@ def add_campaign_recipients(
         if contact_status == ContactStatus.PENDING.value:
             contact_status = ContactStatus.APPROVED.value
             conn.execute(
-                "UPDATE contacts SET status = ?, updated_at = ? WHERE id = ?",
-                (contact_status, now, normalized_contact_id),
+                "UPDATE contacts SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (contact_status, now, normalized_contact_id, user_id),
             )
         recipient_status = (
             ContactStatus.APPROVED.value
@@ -155,7 +156,7 @@ def add_campaign_recipients_by_emails(
         contact = fetch_contact_by_email(conn, email, user_id)
         if contact:
             contact_ids.append(int(contact["id"]))
-    return add_campaign_recipients(conn, campaign_id, contact_ids)
+    return add_campaign_recipients(conn, campaign_id, contact_ids, user_id)
 
 
 def _add_campaign_recipients_by_emails_bulk(

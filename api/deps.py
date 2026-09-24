@@ -15,7 +15,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 from src import db
 from src.db.core import utcnow_iso, resolve_project_path
-from api.auth import get_current_user_id
+from api.auth import get_current_user_id, require_admin_user
 
 
 def get_db_path() -> str:

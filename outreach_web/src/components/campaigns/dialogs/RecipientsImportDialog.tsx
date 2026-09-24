@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
+import { useUser } from "@clerk/nextjs";
 import { ArrowLeft, ArrowRight, CheckCircle, Link as LinkIcon, Loader2, Plus, Upload, X } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -41,6 +42,7 @@ export default function RecipientsImportDialog(props: Props) {
 
 function ImportForm({ onClose, campaignId, onImported }: Props) {
   const { API_URL, authFetch } = useApiClient();
+  const { user } = useUser();
   const [method, setMethod] = useState<Method>("paste");
   const [raw, setRaw] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -89,11 +91,12 @@ function ImportForm({ onClose, campaignId, onImported }: Props) {
 
   const uploadCsvs = async (): Promise<UploadedCsv[]> => {
     if (uploadedCsvs?.length === files.length) return uploadedCsvs;
+    if (!user?.id) throw new Error("Your session is still loading. Please try again.");
 
     const totalBytes = files.reduce((total, file) => total + file.size, 0);
     const uploadedBytes = files.map(() => 0);
     const uploads = await Promise.all(files.map(async (file, index) => {
-      const blob = await upload(`campaign-imports/${campaignId}/${safeCsvFilename(file.name, index)}`, file, {
+      const blob = await upload(`campaign-imports/${user.id}/${campaignId}/${safeCsvFilename(file.name, index)}`, file, {
         access: "private",
         contentType: "text/csv",
         handleUploadUrl: "/api/campaign-import-upload",

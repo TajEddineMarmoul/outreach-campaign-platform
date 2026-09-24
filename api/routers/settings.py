@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from api.deps import get_current_user_id
+from api.deps import get_current_user_id, require_admin_user
 from api.schemas import SettingsUpdate
 from src.gmail_sender import credentials_file_path
 from src.platform.db import get_session
@@ -154,14 +154,14 @@ def patch_timezone(
 
 
 @router.get("/api/oauth/status")
-def get_oauth_status(_user_id: str = Depends(get_current_user_id)):
+def get_oauth_status(_admin_user_id: str = Depends(require_admin_user)):
     return {"credentials_json_present": credentials_file_path().exists()}
 
 
 @router.post("/api/oauth/save-credentials-json")
 def save_credentials(
     req: CredentialsContent,
-    _user_id: str = Depends(get_current_user_id),
+    _admin_user_id: str = Depends(require_admin_user),
 ):
     try:
         data = json.loads(req.content)

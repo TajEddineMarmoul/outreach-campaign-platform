@@ -158,16 +158,9 @@ def delay_elapsed(conn, config: AppConfig, user_id: str, now: datetime | None = 
 
 
 def attachment_check(config: AppConfig, campaign) -> SafetyResult:
-    attachment_path = str(campaign["attachment_path"] or "")
-
-    if not attachment_path.strip():
-        return SafetyResult(True)
-
-    path = db.resolve_project_path(attachment_path)
-    if not path.is_file():
-        return SafetyResult(False, f"Attachment is missing: {path}")
-    if path.suffix.lower() != ".pdf":
-        return SafetyResult(False, "Attachment must be a PDF file")
+    # Filesystem paths were a legacy attachment mechanism. The delivery path
+    # accepts only database-backed attachment bytes now, so this check must not
+    # inspect a path supplied by a campaign record.
     return SafetyResult(True)
 
 
@@ -281,10 +274,7 @@ def next_send_time(config: AppConfig, now: datetime | None = None) -> str:
 
 
 def attachment_name(config: AppConfig, campaign) -> str:
-    attachment_path = str(campaign["attachment_path"] or "")
-    if not attachment_path:
-        return ""
-    return Path(attachment_path).name
+    return ""
 
 
 def campaign_checklist(conn, config: AppConfig, campaign, gmail_status, user_id: str) -> dict[str, bool]:

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -27,12 +28,29 @@ IS_PRODUCTION = os.getenv("APP_ENV", "").strip().lower() == "production"
 IDENTITY_MAX_AGE_SECONDS = 60
 IDENTITY_MAX_CLOCK_SKEW_SECONDS = 5
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
+ROLE_MEMBER = "member"
+ROLE_ADMIN = "admin"
 
 
-def _identity_message(*, timestamp: str, method: str, path: str, user_id: str) -> bytes:
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    """Identity asserted by the authenticated frontend proxy."""
+
+    user_id: str
+    is_admin: bool = False
+
+
+def _identity_message(
+    *,
+    timestamp: str,
+    method: str,
+    path: str,
+    user_id: str,
+    role: str = ROLE_MEMBER,
+) -> bytes:
     """Return the canonical payload signed by the frontend proxy."""
 
-    return f"{timestamp}\n{method.upper()}\n{path}\n{user_id}".encode("utf-8")
+    return f"{timestamp}\n{method.upper()}\n{path}\n{user_id}\n{role}".encode("utf-8")
 
 
 def _reject_invalid_identity() -> None:
@@ -42,7 +60,7 @@ def _reject_invalid_identity() -> None:
     )
 
 
-def _signed_user_id(request: Request) -> str:
+def _signed_principal(request: Request) -> AuthenticatedUser:
     if not BACKEND_IDENTITY_SECRET:
         logger.error("BACKEND_IDENTITY_SECRET is missing in production")
         raise HTTPException(
@@ -53,7 +71,10 @@ def _signed_user_id(request: Request) -> str:
     user_id = (request.headers.get("x-backend-user-id") or "").strip()
     timestamp = (request.headers.get("x-backend-auth-timestamp") or "").strip()
     signature = (request.headers.get("x-backend-auth-signature") or "").strip()
+    role = (request.headers.get("x-backend-user-role") or ROLE_MEMBER).strip().lower()
     if not user_id or not USER_ID_PATTERN.fullmatch(user_id) or not signature:
+        _reject_invalid_identity()
+    if role not in {ROLE_MEMBER, ROLE_ADMIN}:
         _reject_invalid_identity()
     try:
         timestamp_value = int(timestamp)
@@ -71,12 +92,48 @@ def _signed_user_id(request: Request) -> str:
             method=request.method,
             path=request.url.path,
             user_id=user_id,
+            role=role,
         ),
         hashlib.sha256,
     ).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        _reject_invalid_identity()
-    return user_id
+    if hmac.compare_digest(signature, expected):
+        return AuthenticatedUser(user_id=user_id, is_admin=role == ROLE_ADMIN)
+
+    # Keep normal requests available while the frontend and API deployments
+    # roll out. Old proxies never carried a role and therefore can only become
+    # regular users; privileged routes still require the new signed admin role.
+    if role == ROLE_MEMBER and not request.headers.get("x-backend-user-role"):
+        legacy_expected = hmac.new(
+            BACKEND_IDENTITY_SECRET.encode("utf-8"),
+            f"{timestamp}\n{request.method.upper()}\n{request.url.path}\n{user_id}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(signature, legacy_expected):
+            return AuthenticatedUser(user_id=user_id)
+    _reject_invalid_identity()
+
+
+def get_current_principal(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> AuthenticatedUser:
+    """Return the authenticated user and their cryptographically bound role."""
+
+    if IS_PRODUCTION:
+        return _signed_principal(request)
+
+    if LOCAL_DEV_USER_ID and credentials:
+        local_token = f"local_dev_{LOCAL_DEV_USER_ID}"
+        if hmac.compare_digest(credentials.credentials, local_token):
+            return AuthenticatedUser(
+                user_id=LOCAL_DEV_USER_ID,
+                is_admin=os.getenv("LOCAL_DEV_IS_ADMIN", "").strip().lower() in {"1", "true", "yes", "on"},
+            )
+
+    if credentials and credentials.credentials.startswith("mock_"):
+        return AuthenticatedUser(user_id=credentials.credentials)
+
+    _reject_invalid_identity()
 
 
 def get_current_user_id(
@@ -90,18 +147,17 @@ def get_current_user_id(
     deliberately remain unavailable in production.
     """
 
-    if IS_PRODUCTION:
-        return _signed_user_id(request)
+    return get_current_principal(request, credentials).user_id
 
-    # A local web app can access one configured account without carrying a
-    # production secret onto the developer machine.
-    if LOCAL_DEV_USER_ID and credentials:
-        local_token = f"local_dev_{LOCAL_DEV_USER_ID}"
-        if hmac.compare_digest(credentials.credentials, local_token):
-            return LOCAL_DEV_USER_ID
 
-    # Development/testing fallback (never accepted in production).
-    if credentials and credentials.credentials.startswith("mock_"):
-        return credentials.credentials
+def require_admin_user(
+    principal: AuthenticatedUser = Depends(get_current_principal),
+) -> str:
+    """Allow a global configuration change only to a Clerk admin."""
 
-    _reject_invalid_identity()
+    if not principal.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator access is required",
+        )
+    return principal.user_id

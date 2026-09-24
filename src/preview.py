@@ -41,7 +41,7 @@ def generate_preview(conn, contact_id: int, user_id: str, campaign_id: int | Non
         subject=rendered.subject,
         body=rendered.body,
         used_fallback=rendered.used_fallback,
-        attachment_path=str(campaign["attachment_path"] or ""),
+        attachment_path="",
     )
 
 

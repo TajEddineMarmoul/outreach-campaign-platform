@@ -51,9 +51,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Outreach App API", version="1.0.0", lifespan=lifespan)
 
+
+def _cors_origin_regex() -> str:
+    configured = os.getenv("CORS_ALLOW_ORIGIN_REGEX", "").strip()
+    if configured:
+        return configured
+    if os.getenv("APP_ENV", "").strip().lower() == "production":
+        return r"^https://www\.outreachemails\.online$"
+    return r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", ".*"),
+    allow_origin_regex=_cors_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

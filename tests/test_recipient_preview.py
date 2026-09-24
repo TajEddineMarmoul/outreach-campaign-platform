@@ -77,8 +77,8 @@ def test_csv_batch_preview_combines_selected_files(preview_client):
 def test_private_blob_csv_preview_reads_selected_files(preview_client, monkeypatch):
     captured = []
 
-    def read_blob(source, campaign_id):
-        captured.append((source.filename, campaign_id))
+    def read_blob(source, campaign_id, user_id):
+        captured.append((source.filename, campaign_id, user_id))
         return pd.DataFrame([{"email": "alex@example.com", "skill": "Design"}]), 42
 
     monkeypatch.setattr(campaigns, "read_recipient_blob_csv", read_blob)
@@ -86,7 +86,7 @@ def test_private_blob_csv_preview_reads_selected_files(preview_client, monkeypat
         "/api/campaigns/42/recipients/preview/csv/blob",
         json={
             "files": [{
-                "url": "https://store.private.blob.vercel-storage.com/campaign-imports/42/design.csv",
+                "url": "https://store.private.blob.vercel-storage.com/campaign-imports/preview-user/42/design.csv",
                 "filename": "design.csv",
             }],
         },
@@ -94,13 +94,25 @@ def test_private_blob_csv_preview_reads_selected_files(preview_client, monkeypat
 
     assert response.status_code == 200
     assert response.json()["total_rows"] == 1
-    assert captured == [("design.csv", 42)]
+    assert captured == [("design.csv", 42, "preview-user")]
 
 
 def test_private_blob_csv_preview_rejects_other_storage_urls(preview_client):
     response = preview_client.post(
         "/api/campaigns/42/recipients/preview/csv/blob",
         json={"files": [{"url": "https://example.com/contacts.csv", "filename": "contacts.csv"}]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_private_blob_csv_preview_rejects_another_users_path(preview_client):
+    response = preview_client.post(
+        "/api/campaigns/42/recipients/preview/csv/blob",
+        json={"files": [{
+            "url": "https://store.private.blob.vercel-storage.com/campaign-imports/other-user/42/contacts.csv",
+            "filename": "contacts.csv",
+        }]},
     )
 
     assert response.status_code == 422

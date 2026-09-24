@@ -7,7 +7,7 @@ from io import StringIO
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import pandas as pd
 import requests
@@ -32,6 +32,7 @@ MAX_PUBLIC_SHEET_BYTES = 100 * 1024 * 1024
 class SheetUrl:
     sheet_id: str
     gid: str | None = None
+    published: bool = False
 
 
 @dataclass(frozen=True)
@@ -49,24 +50,27 @@ def parse_google_sheet_url(url: str) -> str:
 
 def parse_google_sheet_url_details(url: str) -> SheetUrl:
     text = url.strip()
-    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", text)
-    if match:
-        parsed = urlparse(text)
-        query = parse_qs(parsed.query)
-        gid = query.get("gid", [None])[0]
-        if gid is None and "gid=" in parsed.fragment:
-            gid = parse_qs(parsed.fragment).get("gid", [None])[0]
-        return SheetUrl(match.group(1), gid)
-
-    parsed = urlparse(text)
-    query = parse_qs(parsed.query)
-    sheet_id = query.get("id", [None])[0]
-    gid = query.get("gid", [None])[0]
-    if sheet_id:
-        return SheetUrl(sheet_id, gid)
     if re.fullmatch(r"[a-zA-Z0-9-_]{20,}", text):
         return SheetUrl(text)
-    raise ValueError("Could not find a Google Sheet ID in the URL")
+
+    parsed = urlparse(text)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "docs.google.com":
+        raise ValueError("Use a Google Sheets link from docs.google.com or a Google Sheet ID")
+
+    match = re.fullmatch(
+        r"/spreadsheets/(?:u/\d+/)?d/(e/)?([A-Za-z0-9_-]+)(?:/.*)?",
+        parsed.path,
+    )
+    if not match:
+        raise ValueError("Could not find a Google Sheet ID in the URL")
+
+    query = parse_qs(parsed.query)
+    gid = query.get("gid", [None])[0]
+    if gid is None and "gid=" in parsed.fragment:
+        gid = parse_qs(parsed.fragment).get("gid", [None])[0]
+    if gid is not None and not re.fullmatch(r"\d{1,20}", gid):
+        raise ValueError("The Google Sheet tab identifier is invalid")
+    return SheetUrl(match.group(2), gid, published=bool(match.group(1)))
 
 
 def get_public_sheet_csv(
@@ -83,12 +87,18 @@ def get_public_sheet_csv(
     return _read_public_csv(url, header_row)
 
 
-def get_published_csv(url: str, header_row: int = 1) -> pd.DataFrame:
+def get_published_csv(sheet_id: str, gid: str | None = None, header_row: int = 1) -> pd.DataFrame:
+    params = {"output": "csv"}
+    if gid:
+        params["gid"] = gid
+    url = f"https://docs.google.com/spreadsheets/d/e/{sheet_id}/pub?{urlencode(params)}"
     return _read_public_csv(url, header_row)
 
 
 def _read_public_csv(url: str, header_row: int) -> pd.DataFrame:
-    response = requests.get(url, timeout=PUBLIC_SHEET_TIMEOUT)
+    # Every caller constructs this URL from a validated sheet ID. Never follow
+    # redirects: imports must not become requests to a caller-controlled host.
+    response = requests.get(url, timeout=PUBLIC_SHEET_TIMEOUT, allow_redirects=False)
     response.raise_for_status()
     if len(response.content) > MAX_PUBLIC_SHEET_BYTES:
         raise ValueError("The Google Sheet export exceeds the 100 MB per-sheet limit")
@@ -102,6 +112,8 @@ def _read_public_csv(url: str, header_row: int) -> pd.DataFrame:
 
 def list_public_sheet_tabs(sheet_url: str) -> list[dict[str, str | None]]:
     sheet = parse_google_sheet_url_details(sheet_url)
+    if sheet.published:
+        return []
     feed_url = f"https://spreadsheets.google.com/feeds/worksheets/{sheet.sheet_id}/public/basic?alt=json"
     try:
         response = requests.get(feed_url, timeout=20)

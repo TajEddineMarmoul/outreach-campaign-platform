@@ -11,15 +11,8 @@ def test_attachment_path_for_send(mock_resolve):
     campaign_no_attachment = {"attachment_path": ""}
     assert attachment_path_for_send(config, campaign_no_attachment) is None
 
-    # Campaign with attachment but path doesn't exist
-    mock_path = MagicMock()
-    mock_path.exists.return_value = False
-    mock_resolve.return_value = mock_path
-    
+    # Filesystem paths are never resolved or attached.
     campaign_with_attachment = {"attachment_path": "test.pdf"}
     assert attachment_path_for_send(config, campaign_with_attachment) is None
-    
-    # Campaign with attachment that exists
-    mock_path.exists.return_value = True
-    assert attachment_path_for_send(config, campaign_with_attachment) == "test.pdf"
+    mock_resolve.assert_not_called()
 

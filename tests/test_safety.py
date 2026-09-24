@@ -158,7 +158,7 @@ def test_time_window_is_enforced(tmp_path: Path) -> None:
     assert result.reason == "Outside allowed sending window"
 
 
-def test_attachment_missing_blocks_send(tmp_path: Path) -> None:
+def test_legacy_attachment_path_is_ignored(tmp_path: Path) -> None:
     conn = db.init_db(tmp_path / "outreach.db")
     config = AppConfig()
     missing = tmp_path / "missing.pdf"
@@ -176,8 +176,7 @@ def test_attachment_missing_blocks_send(tmp_path: Path) -> None:
         now=datetime(2026, 7, 7, 10, 0, tzinfo=ZoneInfo("Europe/Paris")),
     )
 
-    assert result.allowed is False
-    assert "Attachment is missing" in result.reason
+    assert result.allowed is True
 
 
 def test_resume_after_crash_does_not_resend_attempted_contact(tmp_path: Path) -> None:

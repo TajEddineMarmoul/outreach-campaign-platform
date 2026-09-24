@@ -272,18 +272,9 @@ def build_message(
             subtype=subtype,
             filename=stored_attachment.filename,
         )
-    if not stored_attachments and attachment_path:
-        path = db.resolve_project_path(attachment_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Attachment not found: {path}")
-        mime_type, _ = mimetypes.guess_type(path)
-        maintype, subtype = (mime_type or "application/pdf").split("/", 1)
-        message.add_attachment(
-            path.read_bytes(),
-            maintype=maintype,
-            subtype=subtype,
-            filename=path.name,
-        )
+    # attachment_path is retained only for call compatibility with the legacy
+    # scheduler. It is intentionally ignored: attachments must be supplied as
+    # stored bytes after ownership checks, never read from the server disk.
 
     encoded = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
     return {"raw": encoded}
