@@ -11,7 +11,9 @@ export default clerkMiddleware(async (auth, request) => {
     url.pathname.startsWith("/sign-in") ||
     url.pathname.startsWith("/sign-up") ||
     url.pathname === "/mcp" ||
-    url.pathname.startsWith("/.well-known/oauth-");
+    // Every well-known document is public, listed by prefix so a file
+    // extension cannot change how a route is treated.
+    url.pathname.startsWith("/.well-known/");
 
   if (isPublicRoute) return;
 
@@ -29,7 +31,7 @@ export default clerkMiddleware(async (auth, request) => {
 
 export const config = {
   matcher: [
-    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    "/((?!_next|.well-known|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
     "/(api|trpc)(.*)",
   ],
 };
