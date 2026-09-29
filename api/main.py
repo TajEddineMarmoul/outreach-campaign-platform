@@ -39,10 +39,15 @@ try:  # Keep the rest of the API serving if the optional MCP extra is absent.
         hosted_http_app,
         start_hosted_transport,
     )
-except ImportError:  # pragma: no cover - depends on the deployment's extras
+except ImportError as exc:  # pragma: no cover - depends on the deployment's extras
     bound_workspace_user = None
     hosted_http_app = None
     start_hosted_transport = None
+    # Recorded without its message so the health route can report a cause
+    # without exposing deployment internals.
+    MCP_IMPORT_ERROR = type(exc).__name__
+else:
+    MCP_IMPORT_ERROR = ""
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -101,7 +106,14 @@ def health():
     except Exception as exc:
         logging.getLogger("outreach.health").exception("Database health check failed")
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    return {"status": "ok", "database": "ok"}
+    return {
+        "status": "ok",
+        "database": "ok",
+        # Whether the hosted MCP transport is mounted, and why not if it is
+        # not. Reports an exception class name only, never a message.
+        "mcp": "mounted" if hosted_http_app is not None else "unavailable",
+        "mcp_import_error": MCP_IMPORT_ERROR,
+    }
 
 
 app.include_router(sender_groups.router)
