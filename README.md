@@ -13,6 +13,7 @@ browser sign-in. A delivery worker processes saved jobs independently of the bro
 | --- | --- |
 | Run the app locally | [Development setup](docs/development.md) |
 | Create or schedule a campaign | [Campaign guide](docs/campaigns.md) |
+| Manage campaigns from an AI client | [MCP server](docs/mcp.md) |
 | Work on the frontend | [Frontend README](outreach_web/README.md) |
 | Configure hosting or upgrade the database | [Deployment guide](docs/deployment.md) |
 | Find release notes and design references | [Documentation index](docs/README.md) |

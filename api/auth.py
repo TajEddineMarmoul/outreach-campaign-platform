@@ -38,6 +38,31 @@ class AuthenticatedUser:
 
     user_id: str
     is_admin: bool = False
+    auth_method: str = "proxy"
+
+
+def _workspace_token_principal(raw_token: str) -> AuthenticatedUser:
+    from sqlalchemy import select
+    from src.platform.db import SessionLocal
+    from src.platform.models import WorkspaceAccessToken
+    from src.platform.time import utcnow
+
+    if not raw_token.startswith("outreach_mcp_") or len(raw_token) > 160:
+        _reject_invalid_identity()
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    with SessionLocal() as session:
+        token = session.scalar(
+            select(WorkspaceAccessToken).where(WorkspaceAccessToken.token_hash == token_hash)
+        )
+        if not token or not hmac.compare_digest(token.token_hash, token_hash) or token.revoked_at:
+            _reject_invalid_identity()
+        expires_at = token.expires_at
+        if expires_at.tzinfo is None:
+            from datetime import timezone
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= utcnow():
+            _reject_invalid_identity()
+        return AuthenticatedUser(user_id=token.user_id, auth_method="workspace_token")
 
 
 def _identity_message(
@@ -119,6 +144,11 @@ def get_current_principal(
 ) -> AuthenticatedUser:
     """Return the authenticated user and their cryptographically bound role."""
 
+    if not isinstance(credentials, HTTPAuthorizationCredentials):
+        credentials = None
+    if credentials and credentials.credentials.startswith("outreach_mcp_"):
+        return _workspace_token_principal(credentials.credentials)
+
     if IS_PRODUCTION:
         return _signed_principal(request)
 
@@ -128,10 +158,11 @@ def get_current_principal(
             return AuthenticatedUser(
                 user_id=LOCAL_DEV_USER_ID,
                 is_admin=os.getenv("LOCAL_DEV_IS_ADMIN", "").strip().lower() in {"1", "true", "yes", "on"},
+                auth_method="local",
             )
 
     if credentials and credentials.credentials.startswith("mock_"):
-        return AuthenticatedUser(user_id=credentials.credentials)
+        return AuthenticatedUser(user_id=credentials.credentials, auth_method="mock")
 
     _reject_invalid_identity()
 
@@ -160,4 +191,14 @@ def require_admin_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Administrator access is required",
         )
+    return principal.user_id
+
+
+def require_interactive_user(
+    principal: AuthenticatedUser = Depends(get_current_principal),
+) -> str:
+    """Token issuance and revocation require an interactive Clerk session."""
+
+    if principal.auth_method != "proxy":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sign in to manage access tokens")
     return principal.user_id

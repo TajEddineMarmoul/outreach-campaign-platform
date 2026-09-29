@@ -9,6 +9,7 @@ import { isAdminUser } from "@/lib/auth";
 import { formatTimeZoneLabel, supportedTimeZones } from "@/lib/timezones";
 import {
   AppDialog,
+  ConfirmDialog,
   Notice,
   PageHeading,
   PageState,
@@ -20,6 +21,135 @@ interface Settings {
   max_daily_cap: number;
   bounce_rate_pause_threshold: number;
   max_consecutive_errors: number;
+}
+
+interface WorkspaceToken {
+  id: number;
+  name: string;
+  prefix: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
+function WorkspaceTokens() {
+  const { API_URL, authFetch } = useApiClient();
+  const { data: tokens, mutate } = useSWR<WorkspaceToken[]>(
+    `${API_URL}/api/workspace-tokens`,
+  );
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("Codex campaign manager");
+  const [createdToken, setCreatedToken] = useState("");
+  const [revokeId, setRevokeId] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setActionError("");
+    try {
+      const result = await checkResponse<{ token: string }>(
+        await authFetch(`${API_URL}/api/workspace-tokens`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.trim(), expires_in_days: 365 }),
+        }),
+      );
+      setCreatedToken(result.token);
+      setOpen(false);
+      await mutate();
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async () => {
+    if (revokeId === null) return;
+    setBusy(true);
+    setActionError("");
+    try {
+      await checkResponse(
+        await authFetch(`${API_URL}/api/workspace-tokens/${revokeId}`, {
+          method: "DELETE",
+        }),
+      );
+      await mutate();
+      setRevokeId(null);
+      setMessage("Access token revoked.");
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="app-panel app-settings-general">
+      <h2>AI campaign access</h2>
+      <p className="app-muted">
+        Create a personal token for an MCP client to manage your campaigns and
+        contacts. It has access to your workspace, so keep it private.
+      </p>
+      <Notice error={actionError} message={message} />
+      {createdToken && (
+        <div className="app-field" role="status">
+          <label htmlFor="new-workspace-token">New token — copy it now; it will not be shown again</label>
+          <input id="new-workspace-token" readOnly value={createdToken} onFocus={(event) => event.currentTarget.select()} />
+          <div className="app-dialog-actions">
+            <button className="app-button" onClick={() => void navigator.clipboard.writeText(createdToken)}>
+              Copy token
+            </button>
+            <button className="app-button" onClick={() => setCreatedToken("")}>Done</button>
+          </div>
+        </div>
+      )}
+      <button className="app-button" onClick={() => { setActionError(""); setOpen(true); }}>
+        Create access token
+      </button>
+      {tokens?.length ? (
+        <ul className="app-list" aria-label="Workspace access tokens">
+          {tokens.map((token) => (
+            <li key={token.id} className="app-pager">
+              <span>{token.name} ({token.prefix}…) — {token.revoked_at ? "Revoked" : `Expires ${new Date(token.expires_at).toLocaleDateString()}`}</span>
+              {!token.revoked_at && <button className="app-button is-danger" onClick={() => setRevokeId(token.id)}>Revoke</button>}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <AppDialog
+        open={open}
+        onClose={() => { if (!busy) setOpen(false); }}
+        title="Create AI access token"
+        description="This token grants access to your workspace for one year. You can revoke it here at any time."
+      >
+        <form className="app-form" onSubmit={(event) => void create(event)}>
+          <label className="app-field">
+            Name
+            <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+          <Notice error={actionError} />
+          <div className="app-dialog-actions">
+            <button type="button" className="app-button" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+            <button className="app-button is-primary" disabled={busy || !name.trim()}>{busy ? "Creating…" : "Create token"}</button>
+          </div>
+        </form>
+      </AppDialog>
+      <ConfirmDialog
+        open={revokeId !== null}
+        title="Revoke this token?"
+        description="Any MCP client using it will lose access immediately."
+        busy={busy}
+        error={actionError}
+        onClose={() => { setRevokeId(null); setActionError(""); }}
+        onConfirm={() => void revoke()}
+        label="Revoke token"
+      />
+    </section>
+  );
 }
 
 function ConnectedServices() {
@@ -398,6 +528,7 @@ function SettingsForm({
           </form>
         </div>
       </details>
+      <WorkspaceTokens />
       <Link href="/senders" className="app-text-link">
         Manage sender accounts →
       </Link>

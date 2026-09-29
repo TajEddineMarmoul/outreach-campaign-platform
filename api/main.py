@@ -14,6 +14,7 @@ from sqlalchemy import text
 from api.deps import db
 from api.routers import (
     analytics,
+    audience,
     campaign_delivery,
     campaign_workspace,
     campaigns,
@@ -24,6 +25,7 @@ from api.routers import (
     sender_groups,
     settings,
     templates,
+    workspace_tokens,
 )
 from src.platform.db import SessionLocal
 from src.platform.migrations import upgrade_database
@@ -86,10 +88,12 @@ app.include_router(sender_groups.senders_router)
 app.include_router(campaign_delivery.router)
 app.include_router(campaign_workspace.router)
 app.include_router(campaigns.router)
+app.include_router(audience.router)
 app.include_router(contacts.router)
 app.include_router(email_tracking.router)
 app.include_router(gmail_push.router)
 app.include_router(templates.router)
+app.include_router(workspace_tokens.router)
 app.include_router(settings.router)
 app.include_router(oauth.router)
 app.include_router(analytics.router)

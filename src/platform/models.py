@@ -32,6 +32,19 @@ class User(Base, TimestampMixin):
     campaigns: Mapped[list[Campaign]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
+class WorkspaceAccessToken(Base, TimestampMixin):
+    __tablename__ = "workspace_access_tokens"
+    __table_args__ = (Index("ix_workspace_access_tokens_user", "user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SenderGroup(Base, TimestampMixin):
     __tablename__ = "sender_groups"
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_sender_groups_user_name"),)
