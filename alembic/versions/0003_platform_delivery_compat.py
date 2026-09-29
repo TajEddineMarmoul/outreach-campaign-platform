@@ -75,14 +75,21 @@ def upgrade() -> None:
     op.execute("UPDATE campaigns SET attachment_path = '' WHERE attachment_path IS NULL")
     op.alter_column("campaigns", "attachment_path", server_default="", nullable=False)
 
-    _add_missing(
-        "contacts",
-        [sa.Column("email_normalized", sa.String(length=320), nullable=True)],
-    )
-    op.execute(
-        "UPDATE contacts SET email_normalized = lower(trim(email)) "
-        "WHERE email_normalized IS NULL OR email_normalized = ''"
-    )
+    contact_columns = _columns("contacts")
+    email_normalized_was_missing = "email_normalized" not in contact_columns
+    if email_normalized_was_missing:
+        op.add_column(
+            "contacts",
+            sa.Column("email_normalized", sa.String(length=320), nullable=True),
+        )
+    # Older installs stored the address in `email`; new installs created from
+    # the current metadata already have `email_normalized` and no `email`.
+    # Only backfill when the legacy source column actually exists.
+    if email_normalized_was_missing and "email" in contact_columns:
+        op.execute(
+            "UPDATE contacts SET email_normalized = lower(trim(email)) "
+            "WHERE email_normalized IS NULL OR email_normalized = ''"
+        )
     op.alter_column("contacts", "email_normalized", nullable=False)
     custom_fields = _columns("contacts").get("custom_fields")
     if custom_fields and not isinstance(custom_fields["type"], postgresql.JSONB):
@@ -132,7 +139,8 @@ def upgrade() -> None:
             ),
         ],
     )
-    op.alter_column("senders", "token_path", nullable=True, server_default="")
+    if "token_path" in _columns("senders"):
+        op.alter_column("senders", "token_path", nullable=True, server_default="")
 
     _add_missing(
         "campaign_recipients",

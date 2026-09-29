@@ -8,7 +8,9 @@ from contextlib import asynccontextmanager
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
 from fastapi import FastAPI, HTTPException
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from api.deps import db
@@ -29,6 +31,13 @@ from api.routers import (
 )
 from src.platform.db import SessionLocal
 from src.platform.migrations import upgrade_database
+from api.auth import AuthenticatedUser, IS_PRODUCTION, LOCAL_DEV_USER_ID, _signed_principal
+
+try:  # Keep the rest of the API serving if the optional MCP extra is absent.
+    from outreach_mcp.server import bound_workspace_user, hosted_http_app
+except ImportError:  # pragma: no cover - depends on the deployment's extras
+    bound_workspace_user = None
+    hosted_http_app = None
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -39,7 +48,7 @@ def _env_flag(name: str, *, default: bool) -> bool:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     # A serverless deployment can start multiple instances concurrently. The
     # database is migrated explicitly during deployment instead of on every
     # cold start, avoiding migration races and unnecessary startup work.
@@ -48,7 +57,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         conn = db.init_db()
         conn.close()
         upgrade_database()
-    yield
+    # A reused serverless instance runs startup more than once, and a session
+    # manager can only be started once per instance, so the hosted MCP
+    # transport is rebuilt for every startup.
+    if hosted_http_app is None:
+        yield
+        return
+    transport = hosted_http_app()
+    application.mount("/", _SignedMCPApp(transport))
+    async with transport.router.lifespan_context(transport):
+        yield
 
 
 app = FastAPI(title="Outreach App API", version="1.0.0", lifespan=lifespan)
@@ -97,6 +115,35 @@ app.include_router(workspace_tokens.router)
 app.include_router(settings.router)
 app.include_router(oauth.router)
 app.include_router(analytics.router)
+
+
+class _SignedMCPApp:
+    """Require a fresh frontend proxy assertion before any MCP protocol data."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.inner(scope, receive, send)
+            return
+        request = Request(scope, receive)
+        try:
+            if (
+                not IS_PRODUCTION
+                and LOCAL_DEV_USER_ID
+                and request.headers.get("authorization") == f"Bearer local_dev_{LOCAL_DEV_USER_ID}"
+            ):
+                principal = AuthenticatedUser(LOCAL_DEV_USER_ID, auth_method="local")
+            else:
+                principal = _signed_principal(request)
+        except HTTPException as exc:
+            response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            await response(scope, receive, send)
+            return
+        with bound_workspace_user(principal.user_id):
+            await self.inner(scope, receive, send)
+
 
 if __name__ == "__main__":
     import uvicorn

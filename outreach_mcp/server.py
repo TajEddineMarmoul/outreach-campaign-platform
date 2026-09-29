@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import csv
 import os
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from io import StringIO
 from pathlib import Path
@@ -16,6 +19,49 @@ from mcp.server import MCPServer
 
 mcp = MCPServer("Outreach campaigns")
 DEFAULT_API_URL = "https://api.outreachemails.online"
+_bound_workspace_user: ContextVar[str | None] = ContextVar("outreach_mcp_workspace_user", default=None)
+# The in-process client is shared, so serialize access to it.
+_HOSTED_REQUEST_LOCK = threading.Lock()
+
+
+def hosted_http_app():
+    """Build the streamable-HTTP transport served by the Outreach API.
+
+    A new Starlette application is returned for every call because its session
+    manager can only be started once per instance. A reused serverless instance
+    runs application startup again, so building it here keeps each startup with
+    its own manager.
+    """
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    return mcp.streamable_http_app(
+        stateless_http=True,
+        json_response=True,
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=[
+                "api.outreachemails.online",
+                "testserver",
+                "localhost:*",
+                "127.0.0.1:*",
+            ],
+            allowed_origins=[
+                "https://www.outreachemails.online",
+                "http://localhost:*",
+                "http://127.0.0.1:*",
+            ],
+        ),
+    )
+
+
+@contextmanager
+def bound_workspace_user(user_id: str):
+    """Bind a verified proxy identity to one hosted MCP request."""
+    token = _bound_workspace_user.set(user_id)
+    try:
+        yield
+    finally:
+        _bound_workspace_user.reset(token)
 
 
 def default_token_file() -> Path:
@@ -47,9 +93,56 @@ def _client() -> httpx.Client:
     )
 
 
+@lru_cache(maxsize=1)
+def _hosted_client() -> Any:
+    """One in-process transport for every hosted tool call.
+
+    The hosted endpoint is served by the same FastAPI application, so a hosted
+    request is a sub-request of the deployment that is already running. Reusing
+    a single client keeps the worker thread and event loop stable across calls
+    instead of creating one per tool call.
+    """
+
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+
+    return TestClient(app)
+
+
+def _hosted_headers(method: str, path: str, user_id: str) -> dict[str, str]:
+    """Sign one API request for the workspace bound to this hosted MCP call."""
+
+    from api.auth import (
+        BACKEND_IDENTITY_SECRET,
+        IS_PRODUCTION,
+        LOCAL_DEV_USER_ID,
+        identity_headers,
+    )
+
+    if not IS_PRODUCTION and LOCAL_DEV_USER_ID == user_id:
+        return {"authorization": f"Bearer local_dev_{user_id}"}
+    if not BACKEND_IDENTITY_SECRET:
+        raise RuntimeError("Backend identity signing is not configured")
+    return identity_headers(
+        secret=BACKEND_IDENTITY_SECRET, method=method, path=path, user_id=user_id
+    )
+
+
 def _api(method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> Any:
     try:
-        response = _client().request(method, path, params=params, json=body)
+        user_id = _bound_workspace_user.get()
+        if user_id is None:
+            response = _client().request(method, path, params=params, json=body)
+        else:
+            # The public HTTP MCP endpoint is authenticated by Clerk in the
+            # web app, then by a signed proxy assertion in the API. Never use
+            # the local owner's workspace token for a hosted request.
+            headers = _hosted_headers(method, path, user_id)
+            with _HOSTED_REQUEST_LOCK:
+                response = _hosted_client().request(
+                    method, path, params=params, json=body, headers=headers
+                )
     except httpx.RequestError as exc:
         raise RuntimeError(f"Outreach API is unavailable: {exc.__class__.__name__}") from exc
     if response.is_redirect:

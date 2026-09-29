@@ -9,7 +9,9 @@ export default clerkMiddleware(async (auth, request) => {
     url.pathname === "/sitemap.xml" ||
     url.pathname === "/opengraph-image" ||
     url.pathname.startsWith("/sign-in") ||
-    url.pathname.startsWith("/sign-up");
+    url.pathname.startsWith("/sign-up") ||
+    url.pathname === "/mcp" ||
+    url.pathname.startsWith("/.well-known/oauth-");
 
   if (isPublicRoute) return;
 

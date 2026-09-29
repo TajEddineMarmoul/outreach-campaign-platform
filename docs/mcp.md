@@ -1,11 +1,42 @@
 # Outreach campaign MCP server
 
-The local MCP server lets an AI client manage the owner's Outreach workspace
-through the production API. It uses a revocable token tied to one Clerk user.
-Each API request still passes the app's campaign and contact ownership checks.
-The token cannot administer global Gmail OAuth credentials or create tokens.
+The MCP server lets an AI client manage the owner's Outreach workspace through
+the production API. Each API request still passes the app's campaign and contact
+ownership checks. It cannot administer global Gmail OAuth credentials or create
+access tokens.
 
-## Install and connect
+There are two ways to connect, and both expose the same tools:
+
+| Mode | Endpoint | Authentication |
+| --- | --- | --- |
+| Hosted | `https://www.outreachemails.online/mcp` | Sign in at Clerk; the agent receives a scoped OAuth token |
+| Local | stdio process on your machine | A revocable workspace access token file |
+
+## Hosted connection
+
+Add the server URL to the agent:
+
+```
+https://www.outreachemails.online/mcp
+```
+
+The agent registers itself and opens a Clerk sign-in page. Sign in with the
+Outreach account that owns the workspace, review the requested
+`outreach:manage` scope, and approve. No password or token is shared with the
+agent, and access can be revoked from the Clerk account's connected
+applications.
+
+The request path has two independent checks. The website verifies the agent's
+Clerk OAuth token and requires the `outreach:manage` scope; it then signs a
+short-lived assertion for that Clerk user, which the API verifies before it
+serves any workspace data. The MCP endpoint rejects unsigned requests.
+
+Client onboarding is configured in the Clerk dashboard under
+**Developers → OAuth applications → Settings**: dynamic client registration and
+client ID metadata documents are both published, and `outreach:manage` is a
+default scope so a client that omits the scope parameter still receives it.
+
+## Local connection
 
 From the repository root, install the extra local dependency:
 
@@ -72,7 +103,14 @@ building a draft never sends email.
 ## Maintenance
 
 The API schema includes `alembic/versions/0015_workspace_access_tokens.py`.
-Apply it before using tokens in production. The server itself runs locally
-over stdio; it does not need a separately hosted MCP endpoint. If a token is
-lost or a client should stop working, revoke it in Settings and create a new
-one. Existing campaigns and contacts are unaffected.
+Apply it before using workspace tokens in production.
+
+To stop a hosted client, revoke it in Clerk under the account's connected
+applications. To stop a local client, revoke its token in Settings and create a
+new one. Existing campaigns and contacts are unaffected.
+
+Both modes call the same API, so an agent that has `outreach:manage` can read
+and change campaigns, audiences, senders, contacts, templates, and settings,
+including sending email. Treat an approved agent as equivalent to a signed-in
+browser session.
+

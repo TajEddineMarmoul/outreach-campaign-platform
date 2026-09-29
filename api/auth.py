@@ -78,6 +78,37 @@ def _identity_message(
     return f"{timestamp}\n{method.upper()}\n{path}\n{user_id}\n{role}".encode("utf-8")
 
 
+def identity_headers(
+    *,
+    secret: str,
+    method: str,
+    path: str,
+    user_id: str,
+    role: str = ROLE_MEMBER,
+    timestamp: str | None = None,
+) -> dict[str, str]:
+    """Build the signed assertion the API accepts for one user.
+
+    The frontend proxy and the hosted MCP endpoint both call this so a single
+    implementation defines the assertion format.
+    """
+
+    issued_at = timestamp or str(int(time.time()))
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        _identity_message(
+            timestamp=issued_at, method=method, path=path, user_id=user_id, role=role
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "x-backend-user-id": user_id,
+        "x-backend-user-role": role,
+        "x-backend-auth-timestamp": issued_at,
+        "x-backend-auth-signature": signature,
+    }
+
+
 def _reject_invalid_identity() -> None:
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
