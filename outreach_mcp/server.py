@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 from io import StringIO
@@ -27,10 +27,12 @@ _HOSTED_REQUEST_LOCK = threading.Lock()
 def hosted_http_app():
     """Build the streamable-HTTP transport served by the Outreach API.
 
-    A new Starlette application is returned for every call because its session
-    manager can only be started once per instance. A reused serverless instance
-    runs application startup again, so building it here keeps each startup with
-    its own manager.
+    The caller mounts this while the application module is imported, because a
+    hosting platform may serve requests without running application startup.
+    Startup only needs to start the session manager and may run more than once
+    in a reused instance. The session manager is private to this module, so the
+    caller drives it through ``start_hosted_transport`` instead of reaching into
+    the returned application.
     """
 
     from mcp.server.transport_security import TransportSecuritySettings
@@ -62,6 +64,26 @@ def bound_workspace_user(user_id: str):
         yield
     finally:
         _bound_workspace_user.reset(token)
+
+
+@asynccontextmanager
+async def start_hosted_transport():
+    """Run the hosted transport for the duration of one application startup.
+
+    A hosting platform can start the same instance more than once, and a session
+    manager may only be run once per instance, so a completed previous run is
+    released first.
+    """
+
+    manager = mcp.session_manager
+    if getattr(manager, "_has_started", False):
+        task_group = getattr(manager, "_task_group", None)
+        if task_group is not None:
+            await task_group.__aexit__(None, None, None)
+        manager._has_started = False
+        manager._task_group = None
+    async with manager.run():
+        yield
 
 
 def default_token_file() -> Path:

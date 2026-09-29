@@ -34,10 +34,15 @@ from src.platform.migrations import upgrade_database
 from api.auth import AuthenticatedUser, IS_PRODUCTION, LOCAL_DEV_USER_ID, _signed_principal
 
 try:  # Keep the rest of the API serving if the optional MCP extra is absent.
-    from outreach_mcp.server import bound_workspace_user, hosted_http_app
+    from outreach_mcp.server import (
+        bound_workspace_user,
+        hosted_http_app,
+        start_hosted_transport,
+    )
 except ImportError:  # pragma: no cover - depends on the deployment's extras
     bound_workspace_user = None
     hosted_http_app = None
+    start_hosted_transport = None
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -57,15 +62,13 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         conn = db.init_db()
         conn.close()
         upgrade_database()
-    # A reused serverless instance runs startup more than once, and a session
-    # manager can only be started once per instance, so the hosted MCP
-    # transport is rebuilt for every startup.
-    if hosted_http_app is None:
+    # The route is mounted at import time, because a platform may serve
+    # requests without running startup. Startup only needs to bring the
+    # transport's session manager up.
+    if start_hosted_transport is None:
         yield
         return
-    transport = hosted_http_app()
-    application.mount("/", _SignedMCPApp(transport))
-    async with transport.router.lifespan_context(transport):
+    async with start_hosted_transport():
         yield
 
 
@@ -142,7 +145,29 @@ class _SignedMCPApp:
             await response(scope, receive, send)
             return
         with bound_workspace_user(principal.user_id):
-            await self.inner(scope, receive, send)
+            try:
+                await self.inner(scope, receive, send)
+            except RuntimeError as exc:
+                # The transport reports this when the platform served a request
+                # without running application startup. Answer with a clear
+                # error instead of leaking an internal failure.
+                if "Task group is not initialized" not in str(exc):
+                    raise
+                response = JSONResponse(
+                    {"detail": "The MCP endpoint is still starting up. Retry in a moment."},
+                    status_code=503,
+                )
+                try:
+                    await response(scope, receive, send)
+                except RuntimeError:
+                    # The transport already began its own response.
+                    pass
+
+
+if hosted_http_app is not None:
+    # Mounted while the module is imported so the route exists even when the
+    # platform serves a request without running application startup.
+    app.mount("/", _SignedMCPApp(hosted_http_app()))
 
 
 if __name__ == "__main__":
