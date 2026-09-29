@@ -9,6 +9,7 @@ import { checkResponse, errorMessage, useApiClient } from "@/lib/api";
 import {
   ActionMenu,
   AppDialog,
+  ConfirmDialog,
   MenuAction,
   Notice,
   PageHeading,
@@ -35,6 +36,9 @@ interface Campaign {
   skipped_count?: number;
   updated_at?: string;
 }
+
+type ConfirmedCampaignAction = "stop" | "delete";
+
 const PAGE_SIZE = 6;
 
 export default function CampaignsPage() {
@@ -58,6 +62,10 @@ function CampaignsContent() {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [pendingAction, setPendingAction] = useState<{
+    campaign: Campaign;
+    action: ConfirmedCampaignAction;
+  } | null>(null);
   const fromWelcome = searchParams.get("create") === "1";
   const createOpen = open || fromWelcome;
   const closeCreate = () => {
@@ -116,6 +124,31 @@ function CampaignsContent() {
       setBusy(false);
     }
   };
+  const runCampaignAction = async (
+    campaign: Campaign,
+    action: "pause" | "resume" | ConfirmedCampaignAction,
+  ) => {
+    setBusy(true);
+    setActionError("");
+    try {
+      await checkResponse(
+        await authFetch(`${API_URL}/api/campaigns/${campaign.id}/${action}`, {
+          method: action === "delete" ? "DELETE" : "POST",
+        }),
+      );
+      await mutate();
+      setPendingAction(null);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const confirmAction = pendingAction?.action;
+  const isActiveCampaign = (campaign: Campaign) =>
+    ["sending", "scheduled", "autopilot", "paused"].includes(
+      campaign.status,
+    );
   return (
     <div className="app-page">
       <PageHeading
@@ -246,6 +279,65 @@ function CampaignsContent() {
                           <MenuAction onClick={() => void duplicate(item.id)}>
                             Duplicate campaign
                           </MenuAction>
+                          {item.status === "paused" && (
+                            <MenuAction
+                              onClick={() =>
+                                void runCampaignAction(item, "resume")
+                              }
+                            >
+                              Resume campaign
+                            </MenuAction>
+                          )}
+                          {["sending", "scheduled", "autopilot"].includes(
+                            item.status,
+                          ) && (
+                            <MenuAction
+                              onClick={() =>
+                                void runCampaignAction(item, "pause")
+                              }
+                            >
+                              Pause campaign
+                            </MenuAction>
+                          )}
+                          {!isActiveCampaign(item) &&
+                            !["ended", "stopped"].includes(item.status) && (
+                              <MenuAction
+                                onClick={() =>
+                                  router.push(
+                                    `/campaigns/${item.id}?step=review`,
+                                  )
+                                }
+                              >
+                                Review &amp; launch
+                              </MenuAction>
+                            )}
+                          {isActiveCampaign(item) ? (
+                            <MenuAction
+                              danger
+                              onClick={() => {
+                                setActionError("");
+                                setPendingAction({
+                                  campaign: item,
+                                  action: "stop",
+                                });
+                              }}
+                            >
+                              End campaign
+                            </MenuAction>
+                          ) : (
+                            <MenuAction
+                              danger
+                              onClick={() => {
+                                setActionError("");
+                                setPendingAction({
+                                  campaign: item,
+                                  action: "delete",
+                                });
+                              }}
+                            >
+                              Delete campaign
+                            </MenuAction>
+                          )}
                         </ActionMenu>
                       </td>
                     </tr>
@@ -300,6 +392,33 @@ function CampaignsContent() {
           </div>
         </form>
       </AppDialog>
+      <ConfirmDialog
+        open={Boolean(pendingAction)}
+        onClose={() => {
+          setActionError("");
+          setPendingAction(null);
+        }}
+        title={
+          confirmAction === "delete"
+            ? `Delete ${pendingAction?.campaign.name || "this campaign"}?`
+            : `End ${pendingAction?.campaign.name || "this campaign"}?`
+        }
+        description={
+          confirmAction === "delete"
+            ? "This permanently removes the campaign, its recipients, and its delivery history. This cannot be undone."
+            : "Future sends will be cancelled. Emails already in progress may finish, and the campaign history will be kept."
+        }
+        busy={busy}
+        error={actionError}
+        onConfirm={() => {
+          if (!pendingAction) return;
+          void runCampaignAction(
+            pendingAction.campaign,
+            pendingAction.action,
+          );
+        }}
+        label={confirmAction === "delete" ? "Delete campaign" : "End campaign"}
+      />
     </div>
   );
 }
