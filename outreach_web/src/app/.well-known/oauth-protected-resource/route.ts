@@ -6,11 +6,11 @@ import {
 import { SITE_URL } from "@/lib/site";
 
 /**
- * OAuth 2.0 Protected Resource Metadata (RFC 9728).
+ * OAuth 2.0 Protected Resource Metadata (RFC 9728) at the well-known root.
  *
- * `resource` identifies the protected resource itself, so it names the MCP
- * endpoint rather than the site origin. Clients send the same value in the
- * authorization request's `resource` parameter.
+ * The challenge from `/mcp` points at `/.well-known/oauth-protected-resource/mcp`,
+ * which is the suffix form RFC 9728 recommends for a resource with a path.
+ * This root document covers clients that probe the reserved path directly.
  */
 const handler = protectedResourceHandlerClerk({
   resource: `${SITE_URL}/mcp`,

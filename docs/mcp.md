@@ -14,7 +14,22 @@ There are two ways to connect, and both expose the same tools:
 
 ## Hosted connection
 
-Add the server URL to the agent:
+An agent that is given only the site address can find the endpoint by itself.
+Fetching the server card at `https://www.outreachemails.online/.well-known/mcp.json`
+returns the transport and the endpoint URL, so no connection detail has to be
+typed in by hand:
+
+```json
+{
+  "name": "outreach-campaigns",
+  "remotes": [
+    { "type": "streamable-http", "url": "https://www.outreachemails.online/mcp" }
+  ]
+}
+```
+
+Add the server URL to the agent directly, or point it at the site and let it
+read the card:
 
 ```
 https://www.outreachemails.online/mcp
@@ -30,6 +45,19 @@ The request path has two independent checks. The website verifies the agent's
 Clerk OAuth token and requires the `outreach:manage` scope; it then signs a
 short-lived assertion for that Clerk user, which the API verifies before it
 serves any workspace data. The MCP endpoint rejects unsigned requests.
+
+### Discovery documents
+
+| Document | Purpose |
+| --- | --- |
+| `/.well-known/mcp.json` | Server card (SEP-2127): names the transport and endpoint. |
+| `/.well-known/oauth-protected-resource/mcp` | The resource a client reaches, its authorization server, and `outreach:manage`. |
+| `/.well-known/oauth-protected-resource` | The same document at the well-known root, for clients that probe it directly. |
+| `/.well-known/oauth-authorization-server` | Clerk's authorization server metadata, including the registration endpoint. |
+
+The card declares no authentication on purpose: a client learns the endpoint
+requires access by calling it, receiving a `401` challenge, and following
+`resource_metadata` from that challenge.
 
 Client onboarding is configured in the Clerk dashboard under
 **Developers → OAuth applications → Settings**: dynamic client registration and

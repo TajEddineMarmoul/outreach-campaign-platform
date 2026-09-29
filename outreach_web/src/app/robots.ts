@@ -5,7 +5,7 @@ export default function robots(): MetadataRoute.Robots {
   return {
     rules: {
       userAgent: "*",
-      allow: "/",
+      allow: ["/", "/.well-known/mcp.json"],
       disallow: [
         "/analytics/",
         "/animation-lab/",
