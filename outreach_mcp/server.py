@@ -164,8 +164,11 @@ def _api(
 ) -> Any:
     try:
         user_id = _bound_workspace_user.get()
+        # httpx rejects a request that carries both a JSON body and files, so a
+        # multipart upload must not also send body=None as JSON.
+        payload: dict = {} if files else {"json": body}
         if user_id is None:
-            response = _client().request(method, path, params=params, json=body, files=files)
+            response = _client().request(method, path, params=params, files=files, **payload)
         else:
             # The public HTTP MCP endpoint is authenticated by Clerk in the
             # web app, then by a signed proxy assertion in the API. Never use
@@ -173,7 +176,7 @@ def _api(
             headers = _hosted_headers(method, path, user_id)
             with _HOSTED_REQUEST_LOCK:
                 response = _hosted_client().request(
-                    method, path, params=params, json=body, files=files, headers=headers
+                    method, path, params=params, files=files, headers=headers, **payload
                 )
     except httpx.RequestError as exc:
         raise RuntimeError(f"Outreach API is unavailable: {exc.__class__.__name__}") from exc

@@ -12,6 +12,49 @@ import base64
 from outreach_mcp import server as mcp_server
 
 
+class _RecordingClient:
+    """Stands in for httpx and rejects the argument combination httpx rejects."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def request(self, method, path, **kwargs):
+        if kwargs.get("json") is not None and kwargs.get("files") is not None:
+            raise TypeError("json and files cannot be combined")
+
+        class _Response:
+            is_redirect = False
+            is_success = True
+            status_code = 200
+            content = b"{}"
+
+            @staticmethod
+            def json():
+                return {"ok": True}
+
+        self.calls.append({"method": method, "path": path, **kwargs})
+        return _Response()
+
+
+def test_api_never_combines_json_with_files(monkeypatch):
+    """An upload must send multipart alone; httpx rejects json plus files."""
+
+    client = _RecordingClient()
+    monkeypatch.setattr(mcp_server, "_client", lambda: client)
+
+    mcp_server._api("POST", "/api/campaigns/1/attachments",
+                    files=[("files", ("a.txt", b"x", "text/plain"))])
+    upload_call = client.calls[-1]
+    assert upload_call["files"] is not None
+    assert "json" not in upload_call
+
+    # A normal JSON call still sends its body.
+    mcp_server._api("POST", "/api/campaigns", body={"name": "draft"})
+    json_call = client.calls[-1]
+    assert json_call["json"] == {"name": "draft"}
+    assert json_call["files"] is None
+
+
 def test_manage_campaign_attachment_sends_multipart_bytes(monkeypatch):
     """Add must upload real multipart content, and list/remove must target the API."""
 
