@@ -226,7 +226,7 @@ def inspect_campaign(campaign_id: int) -> dict:
     result = {
         "campaign": campaign,
         "settings": _api("GET", path + "/summary"),
-        "attachments": _api("GET", path + "/attachments"),
+        "attachments": _campaign_attachments(campaign_id),
         "audience": _api("GET", path + "/audience", params={"page_size": 5}),
         "validation": _api("GET", path + "/validation-summary"),
         "recipient_template_validation": _api("GET", path + "/recipient-template-validation"),
@@ -654,6 +654,18 @@ def _decode_attachment(content: str, filename: str) -> bytes:
     return raw
 
 
+def _campaign_attachments(campaign_id: int) -> list[dict]:
+    """Read a campaign's attachments.
+
+    The API exposes them on the summary route; there is no attachments listing
+    route, only the upload and delete routes.
+    """
+
+    summary = _api("GET", _campaign_path(campaign_id, "/summary"))
+    attachments = summary.get("attachments") or []
+    return attachments if isinstance(attachments, list) else []
+
+
 @mcp.tool()
 def manage_campaign_attachment(
     campaign_id: int,
@@ -671,7 +683,7 @@ def manage_campaign_attachment(
     path = _campaign_path(campaign_id, "/attachments")
 
     if action == "list":
-        return {"campaign_id": campaign_id, "attachments": _api("GET", path)}
+        return {"campaign_id": campaign_id, "attachments": _campaign_attachments(campaign_id)}
 
     if action == "remove":
         if attachment_id is None:
@@ -680,7 +692,7 @@ def manage_campaign_attachment(
         return {
             "campaign_id": campaign_id,
             "removed": int(attachment_id),
-            "attachments": _api("GET", path),
+            "attachments": _campaign_attachments(campaign_id),
         }
 
     if not files:
@@ -698,7 +710,7 @@ def manage_campaign_attachment(
         "campaign_id": campaign_id,
         "added": [item["filename"] for item in upload_result.get("attachments", [])][-len(upload):],
         "total_size_bytes": upload_result.get("total_size_bytes"),
-        "attachments": _api("GET", path),
+        "attachments": _campaign_attachments(campaign_id),
     }
 
 

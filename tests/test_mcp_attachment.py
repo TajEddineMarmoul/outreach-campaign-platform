@@ -80,39 +80,40 @@ def test_multipart_encoding_survives_a_real_http_round_trip():
 
 
 def test_manage_campaign_attachment_sends_multipart_bytes(monkeypatch):
-    """Add must upload real multipart content, and list/remove must target the API."""
+    """Add must upload real multipart content, and reads must use real routes.
+
+    The API has only an upload route and a delete route. Attachments are read
+    back from the campaign summary, so a listing call to ``/attachments`` would
+    be a 404 in production.
+    """
 
     calls: list[dict] = []
     stored: list[dict] = []
 
-    def fake_api(method, path, *, params=None, body=None, files=None):
-        calls.append({"method": method, "path": path, "files": files})
-        if method == "POST":
-            for field, (filename, raw, content_type) in files or []:
-                assert field == "files"
-                stored.append({
-                    "filename": filename,
-                    "raw": raw,
-                    "content_type": content_type,
-                })
-            return {
-                "attachments": [
-                    {"id": index + 1, "filename": item["filename"],
-                     "content_type": item["content_type"],
-                     "size_bytes": len(item["raw"]), "sha256": "0" * 64}
-                    for index, item in enumerate(stored)
-                ],
-                "total_size_bytes": sum(len(i["raw"]) for i in stored),
-            }
-        if method == "DELETE":
-            # Real API ids are assigned on insert, so remove by position.
-            del stored[int(path.rsplit("/", 1)[-1]) - 1]
+    def serialized() -> list[dict]:
         return [
             {"id": index + 1, "filename": item["filename"],
              "content_type": item["content_type"], "size_bytes": len(item["raw"]),
              "sha256": "0" * 64}
             for index, item in enumerate(stored)
         ]
+
+    def fake_api(method, path, *, params=None, body=None, files=None):
+        calls.append({"method": method, "path": path, "files": files})
+        if method == "POST":
+            for field, (filename, raw, content_type) in files or []:
+                assert field == "files"
+                stored.append({"filename": filename, "raw": raw, "content_type": content_type})
+            return {
+                "attachments": serialized(),
+                "total_size_bytes": sum(len(i["raw"]) for i in stored),
+            }
+        if method == "DELETE":
+            del stored[int(path.rsplit("/", 1)[-1]) - 1]
+            return {"status": "success"}
+        # The only read route the tool may use.
+        assert path.endswith("/summary"), f"unexpected read route: {path}"
+        return {"attachments": serialized()}
 
     monkeypatch.setattr(mcp_server, "_api", fake_api)
 
@@ -138,7 +139,8 @@ def test_manage_campaign_attachment_sends_multipart_bytes(monkeypatch):
     assert removed["removed"] == 1
     assert removed["attachments"] == []
     assert any(c["method"] == "DELETE" for c in calls)
-    assert all("/api/campaigns/42/attachments" in c["path"] for c in calls)
+    assert any(c["method"] == "POST" for c in calls)
+    assert all("campaigns/42" in c["path"] for c in calls)
 
 
 def test_manage_campaign_attachment_accepts_data_urls(monkeypatch):
@@ -150,7 +152,7 @@ def test_manage_campaign_attachment_accepts_data_urls(monkeypatch):
         if method == "POST":
             captured["files"] = files
             return {"attachments": [], "total_size_bytes": 0}
-        return []
+        return {"attachments": []}
 
     monkeypatch.setattr(mcp_server, "_api", fake_api)
     raw = b"hello attachment"
