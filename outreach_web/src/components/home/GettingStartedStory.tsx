@@ -35,6 +35,16 @@ const questions = [
     question: "Can I pause sending?",
     answer: "Yes. You can pause future sends and continue when you are ready.",
   },
+  {
+    question: "Can an AI agent manage my campaigns?",
+    answer: (
+      <>
+        Yes. Outreach runs an MCP server, so an assistant like Claude or Codex can
+        work on your campaigns directly after you approve access once.{" "}
+        <Link href="/mcp-guide">How to connect an agent</Link>.
+      </>
+    ),
+  },
 ];
 
 function Chevron() {

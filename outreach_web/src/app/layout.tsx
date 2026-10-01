@@ -44,6 +44,16 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased text-base`}
     >
+      <head>
+        {/*
+          llms.txt v2 link relations. An agent given only the site address can
+          reach the product description and the setup guide without guessing a
+          path. Emitted as tags because the Metadata API has no field for these
+          relations.
+        */}
+        <link rel="describedby" href="/llms.txt" />
+        <link rel="alternate" type="text/markdown" href="/index.md" />
+      </head>
       <body className="min-h-full flex overflow-x-hidden bg-slate-50/30 text-slate-900">
         <ClerkProvider>
           <AuthProvider>

@@ -7,6 +7,9 @@ import { NextResponse } from "next/server";
 const PUBLIC_PATHS = new Set([
   "/",
   "/animation-lab",
+  // Agent-facing: a text version of the product and the connect guide, both
+  // advertised from the document head of every page.
+  "/index.md",
   "/llms.txt",
   "/mcp-guide",
   "/robots.txt",
