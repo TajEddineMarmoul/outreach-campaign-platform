@@ -8,5 +8,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: "weekly",
       priority: 1,
     },
+    {
+      // Public on purpose: agents and account owners use it to connect a client.
+      url: `${SITE_URL}/mcp-guide`,
+      changeFrequency: "monthly",
+      priority: 0.6,
+    },
   ];
 }

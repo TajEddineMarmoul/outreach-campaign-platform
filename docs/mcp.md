@@ -5,12 +5,26 @@ the production API. Each API request still passes the app's campaign and contact
 ownership checks. It cannot administer global Gmail OAuth credentials or create
 access tokens.
 
-There are two ways to connect, and both expose the same tools:
+## Choose one mode
 
-| Mode | Endpoint | Authentication |
+The two modes are alternatives, not steps. Pick the hosted endpoint unless you
+are working on this repository itself.
+
+| | Hosted | Local |
 | --- | --- | --- |
-| Hosted | `https://www.outreachemails.online/mcp` | Sign in at Clerk; the agent receives a scoped OAuth token |
-| Local | stdio process on your machine | A revocable workspace access token file |
+| Use when | An agent anywhere should manage the workspace | You are developing in this repository |
+| Connection | Add the URL; nothing to install | A stdio process on this machine |
+| Sign-in | Clerk OAuth, in a browser, approve once | None. Trusts this machine's token file |
+| Needs | A browser to approve access | This repo, its virtualenv, and a provisioned token |
+
+The local mode has no login step by design: it reads a token file from the local
+machine. If someone expects a sign-in and gets none, they are on the local path.
+
+An agent given only the site address can find everything it needs:
+
+- `https://www.outreachemails.online/llms.txt` — step-by-step setup guide
+- `https://www.outreachemails.online/mcp-guide` — the same guide as a web page
+- `https://www.outreachemails.online/.well-known/mcp.json` — server card
 
 ## Hosted connection
 

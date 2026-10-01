@@ -1,21 +1,35 @@
 import { clerkMiddleware } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
+// Paths served to signed-out visitors. Anything an AI agent needs in order to
+// discover and connect to the MCP server belongs here, or the agent is sent to
+// a sign-in page instead of the document it asked for.
+const PUBLIC_PATHS = new Set([
+  "/",
+  "/animation-lab",
+  "/llms.txt",
+  "/mcp-guide",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/opengraph-image",
+  "/mcp",
+]);
+
+// Prefixes served to signed-out visitors. Every well-known document is public,
+// matched by prefix so a file extension cannot change how a path is handled.
+const PUBLIC_PREFIXES = ["/.well-known/", "/sign-in", "/sign-up"];
+
+function isPublicPath(pathname: string): boolean {
+  return (
+    PUBLIC_PATHS.has(pathname) ||
+    PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))
+  );
+}
+
 export default clerkMiddleware(async (auth, request) => {
   const url = new URL(request.url);
-  const isPublicRoute =
-    url.pathname === "/" ||
-    url.pathname === "/robots.txt" ||
-    url.pathname === "/sitemap.xml" ||
-    url.pathname === "/opengraph-image" ||
-    url.pathname.startsWith("/sign-in") ||
-    url.pathname.startsWith("/sign-up") ||
-    url.pathname === "/mcp" ||
-    // Every well-known document is public, listed by prefix so a file
-    // extension cannot change how a route is treated.
-    url.pathname.startsWith("/.well-known/");
 
-  if (isPublicRoute) return;
+  if (isPublicPath(url.pathname)) return;
 
   const { userId } = await auth();
   if (!userId) {

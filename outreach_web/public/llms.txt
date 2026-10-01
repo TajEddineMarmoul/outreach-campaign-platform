@@ -1,0 +1,97 @@
+# Outreach — MCP server
+
+Outreach is an email campaign platform. It runs a remote MCP server that lets an
+AI agent manage one workspace: campaigns, audiences, senders, contacts,
+templates, and sending limits.
+
+This file is the setup guide. Everything below is verified against production.
+
+## Connect in four steps
+
+**Endpoint:** `https://www.outreachemails.online/mcp`
+**Transport:** Streamable HTTP (JSON responses, stateless — do not expect or send
+an `mcp-session-id`)
+**Authentication:** OAuth 2.0 authorization code with PKCE
+**Required scope:** `outreach:manage`
+
+1. **Discover.** Fetch `https://www.outreachemails.online/.well-known/mcp.json`.
+   It returns the endpoint URL, so you never have to guess a path.
+
+2. **Register.** Read `registration_endpoint` from
+   `https://www.outreachemails.online/.well-known/oauth-authorization-server` and
+   POST a client registration there (RFC 7591 dynamic client registration) with
+   `token_endpoint_auth_method: "none"`, your `redirect_uris`, and
+   `scope: "outreach:manage offline_access"`. The response contains your
+   `client_id`. There is no client secret. A public client cannot keep one.
+
+3. **Authorize.** Send the human to the `authorization_endpoint` with
+   `response_type=code`, your `client_id`, `redirect_uri`, `state`, a PKCE S256
+   `code_challenge`, and `scope=outreach:manage offline_access`. The human signs
+   in to Outreach and approves. You receive a `code` at your redirect URI.
+
+4. **Exchange and call.** POST the `code` plus your PKCE `code_verifier` to the
+   `token_endpoint`. Then call the MCP endpoint with
+   `Authorization: Bearer <access_token>`.
+
+If a step confuses you, skip the guessing: `POST /mcp` with no token and read the
+`WWW-Authenticate` header. It states the required scope and the exact metadata URL.
+
+## What the endpoint answers
+
+| Request | Response |
+| --- | --- |
+| `POST /mcp` with no token | `401` plus `WWW-Authenticate` naming `scope` and `resource_metadata` |
+| `POST /mcp` with a valid token | `200`, JSON-RPC result |
+| `POST /mcp` with a token lacking `outreach:manage` | `403 insufficient_scope` |
+
+Supported JSON-RPC methods: `initialize`, `tools/list`, `tools/call`.
+Protocol version `2025-06-18`.
+
+## Tools
+
+Campaigns: `workspace_overview`, `inspect_campaign`, `create_campaign`,
+`update_campaign_setup`, `duplicate_campaign`, `delete_campaign`.
+
+Audience: `search_audience`, `add_campaign_recipients`,
+`attach_saved_audience_by_filter`, `manage_campaign_recipient`,
+`preview_campaign`.
+
+Delivery: `launch_campaign`, `control_campaign`, `campaign_activity`,
+`update_autopilot_limits`.
+
+Senders and settings: `sender_groups`, `manage_sender`, `manage_template`,
+`workspace_settings`, `manage_contact`.
+
+Start with `workspace_overview` to learn campaign IDs. `launch_campaign` sends
+real email when it is not a dry run; `delete_campaign` requires the campaign's
+exact name.
+
+## Common mistakes
+
+- **Looking for an API key or a token file.** The hosted server has neither. It
+  is OAuth only. A workspace token file is a separate local stdio mode.
+- **Calling `/mcp` with no credentials and reporting the server broken.** A `401`
+  is the normal, correct response. It carries the discovery information.
+- **Sending an `initialize` handshake and expecting a session.** The endpoint is
+  stateless.
+- **Guessing the scope.** Use `outreach:manage` exactly. Omitting the scope
+  parameter entirely also works, because it is a registered default scope.
+- **Assuming the `www` host is optional.** Use
+  `https://www.outreachemails.online` exactly as written; that is the registered
+  origin.
+
+## Documents
+
+- `/.well-known/mcp.json` — server card: transport and endpoint
+- `/.well-known/oauth-protected-resource/mcp` — resource, authorization server, allowed scope
+- `/.well-known/oauth-authorization-server` — Clerk authorization server metadata
+- `/mcp-guide` — the same setup guide as a web page
+- `https://api.outreachemails.online/health` — API health, reports MCP mount state
+
+## Access and safety
+
+Access is granted per user at Clerk during sign-in and can be revoked there.
+A connected agent can read and change campaigns, audiences, senders, contacts,
+templates, and settings, and can send email. It cannot administer global Gmail
+OAuth credentials or mint access tokens. Treat an approved agent as equivalent
+to a signed-in browser session.
