@@ -136,6 +136,16 @@ credentials or Clerk secrets are placed in Codex's MCP configuration.
 | `manage_template` | Manage reusable message templates. |
 | `workspace_settings` | View or change timezone and sending safety limits. |
 | `manage_contact` | Save a contact or add an address to do-not-contact. |
+| `manage_campaign_attachment` | List, add, or remove a campaign's email attachments. |
+
+### Attachments
+
+`manage_campaign_attachment` mirrors the website's upload control. Pass files as
+`[{"filename": "cv.pdf", "content_base64": "<base64 or data URL>"}]`. The API's
+own limits apply: `.pdf .png .jpg .jpeg .gif .webp .txt .doc .docx` only, 10 MB
+per file, 20 MB per campaign, and the campaign must still be editable. Content is
+sent inline because the server cannot read a client's disk; there is no
+URL-fetch source.
 
 Create and update tools can perform several API calls. If a later step fails,
 they return the campaign ID and the steps that succeeded so the client can

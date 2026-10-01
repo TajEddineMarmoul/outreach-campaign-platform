@@ -62,6 +62,13 @@ Delivery: `launch_campaign`, `control_campaign`, `campaign_activity`,
 Senders and settings: `sender_groups`, `manage_sender`, `manage_template`,
 `workspace_settings`, `manage_contact`.
 
+Attachments: `manage_campaign_attachment` lists, adds, or removes a campaign's
+email attachments. Pass files as
+`[{"filename": "cv.pdf", "content_base64": "<base64 or data URL>"}]`. Limits:
+`.pdf .png .jpg .jpeg .gif .webp .txt .doc .docx`, 10 MB per file, 20 MB per
+campaign, and the campaign must still be editable. Content is inline because the
+server cannot read your disk.
+
 Start with `workspace_overview` to learn campaign IDs. `launch_campaign` sends
 real email when it is not a dry run; `delete_campaign` requires the campaign's
 exact name.

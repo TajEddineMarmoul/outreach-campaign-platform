@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
+import mimetypes
 import os
 import threading
 from contextlib import asynccontextmanager, contextmanager
@@ -151,11 +154,18 @@ def _hosted_headers(method: str, path: str, user_id: str) -> dict[str, str]:
     )
 
 
-def _api(method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> Any:
+def _api(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    body: dict | None = None,
+    files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+) -> Any:
     try:
         user_id = _bound_workspace_user.get()
         if user_id is None:
-            response = _client().request(method, path, params=params, json=body)
+            response = _client().request(method, path, params=params, json=body, files=files)
         else:
             # The public HTTP MCP endpoint is authenticated by Clerk in the
             # web app, then by a signed proxy assertion in the API. Never use
@@ -163,7 +173,7 @@ def _api(method: str, path: str, *, params: dict | None = None, body: dict | Non
             headers = _hosted_headers(method, path, user_id)
             with _HOSTED_REQUEST_LOCK:
                 response = _hosted_client().request(
-                    method, path, params=params, json=body, headers=headers
+                    method, path, params=params, json=body, files=files, headers=headers
                 )
     except httpx.RequestError as exc:
         raise RuntimeError(f"Outreach API is unavailable: {exc.__class__.__name__}") from exc
@@ -207,12 +217,13 @@ def workspace_overview(search: str = "", status: str = "", limit: int = 50) -> d
 
 @mcp.tool()
 def inspect_campaign(campaign_id: int) -> dict:
-    """Get complete campaign content, sender/schedule settings, audience facets and launch checks in one call."""
+    """Get complete campaign content, attachments, sender/schedule settings, audience facets and launch checks in one call."""
     path = _campaign_path(campaign_id)
     campaign = _api("GET", path)
     result = {
         "campaign": campaign,
         "settings": _api("GET", path + "/summary"),
+        "attachments": _api("GET", path + "/attachments"),
         "audience": _api("GET", path + "/audience", params={"page_size": 5}),
         "validation": _api("GET", path + "/validation-summary"),
         "recipient_template_validation": _api("GET", path + "/recipient-template-validation"),
@@ -623,6 +634,69 @@ def manage_contact(
         "last_name": last_name,
         "company": company,
     })
+
+
+def _decode_attachment(content: str, filename: str) -> bytes:
+    """Decode one attachment payload supplied as base64 or a data URL."""
+
+    payload = content.strip()
+    if payload.startswith("data:"):
+        _, _, payload = payload.partition(",")
+    try:
+        raw = base64.b64decode(payload, validate=False)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"Attachment content is not valid base64: {filename}") from exc
+    if not raw:
+        raise ValueError(f"Attachment is empty: {filename}")
+    return raw
+
+
+@mcp.tool()
+def manage_campaign_attachment(
+    campaign_id: int,
+    action: Literal["list", "add", "remove"],
+    files: list[dict] | None = None,
+    attachment_id: int | None = None,
+) -> dict:
+    """List, add or remove a campaign's email attachments.
+
+    Add files as
+    ``[{"filename": "cv.pdf", "content_base64": "<base64 or data URL>"}]``.
+    The API's own limits apply: `.pdf .png .jpg .jpeg .gif .webp .txt .doc .docx`
+    only, 10 MB per file and 20 MB per campaign, on an editable campaign.
+    """
+    path = _campaign_path(campaign_id, "/attachments")
+
+    if action == "list":
+        return {"campaign_id": campaign_id, "attachments": _api("GET", path)}
+
+    if action == "remove":
+        if attachment_id is None:
+            raise ValueError("attachment_id is required to remove an attachment")
+        _api("DELETE", f"{path}/{int(attachment_id)}")
+        return {
+            "campaign_id": campaign_id,
+            "removed": int(attachment_id),
+            "attachments": _api("GET", path),
+        }
+
+    if not files:
+        raise ValueError("Provide at least one file to add")
+    upload: list[tuple[str, tuple[str, bytes, str]]] = []
+    for item in files:
+        filename = str(item.get("filename") or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+        if not filename:
+            raise ValueError("Every file needs a filename")
+        raw = _decode_attachment(str(item.get("content_base64") or ""), filename)
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        upload.append(("files", (filename, raw, content_type)))
+    upload_result = _api("POST", path, files=upload)
+    return {
+        "campaign_id": campaign_id,
+        "added": [item["filename"] for item in upload_result.get("attachments", [])][-len(upload):],
+        "total_size_bytes": upload_result.get("total_size_bytes"),
+        "attachments": _api("GET", path),
+    }
 
 
 if __name__ == "__main__":
