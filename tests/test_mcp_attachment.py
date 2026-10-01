@@ -55,6 +55,30 @@ def test_api_never_combines_json_with_files(monkeypatch):
     assert json_call["files"] is None
 
 
+def test_multipart_encoding_survives_a_real_http_round_trip():
+    """Upload bytes must survive multipart encoding and decoding.
+
+    The receiving side is a plain Starlette route defined outside this module,
+    because ``from __future__ import annotations`` turns a locally defined
+    route's parameter annotations into unresolvable forward references.
+    """
+
+    from fastapi.testclient import TestClient
+
+    from tests.multipart_receiver import build_receiver
+
+    payload = b"%PDF-1.4 attachment bytes"
+    with TestClient(build_receiver()) as client:
+        response = client.post("/upload", files={"file": ("cv.pdf", payload, "application/pdf")})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "filename": "cv.pdf",
+        "content_type": "application/pdf",
+        "content": payload.decode(),
+    }
+
+
 def test_manage_campaign_attachment_sends_multipart_bytes(monkeypatch):
     """Add must upload real multipart content, and list/remove must target the API."""
 
