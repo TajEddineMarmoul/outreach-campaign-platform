@@ -3897,3 +3897,64 @@ def test_stopped_campaign_resume_reuses_queued_jobs_after_an_error(tmp_path):
         session.close()
     finally:
         clear_session_override()
+
+
+def test_stopped_autopilot_resume_schedules_next_window(tmp_path, monkeypatch):
+    fixed_now = datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc)
+    next_window = datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc)
+    session_factory = make_session_factory(tmp_path)
+    install_session_override(session_factory)
+    try:
+        campaign_id, _, contact_ids = _seed_delivery_campaign(
+            session_factory,
+            recipient_count=2,
+        )
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        campaign.status = "stopped"
+        campaign.timezone = "UTC"
+        campaign.send_settings = {
+            "mode": "autopilot",
+            "delay_minutes": 5,
+            "pacing_mode": "spread_evenly",
+        }
+        session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": contact_ids[0]},
+        ).status = "sent"
+        session.add(
+            AutopilotDaySchedule(
+                campaign_id=campaign_id,
+                day_of_week="monday",
+                daily_cap=40,
+                start_time="09:00",
+                end_time="16:30",
+            )
+        )
+        session.commit()
+        session.close()
+
+        monkeypatch.setattr(campaign_delivery, "utcnow", lambda: fixed_now)
+        monkeypatch.setattr(platform_jobs, "utcnow", lambda: fixed_now)
+
+        response = TestClient(app).post(
+            f"/api/campaigns/{campaign_id}/resume",
+            headers=HEADERS,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "autopilot"
+        assert response.json()["queued"] == 0
+        assert datetime.fromisoformat(response.json()["scheduled_at"]) == next_window
+
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        assert campaign.status == "autopilot"
+        assert campaign.scheduled_at.replace(tzinfo=timezone.utc) == next_window
+        assert campaign.send_settings["pause_reason"] == "autopilot_outside_window"
+        assert session.scalar(
+            select(SendJob.id).where(SendJob.campaign_id == campaign_id)
+        ) is None
+        session.close()
+    finally:
+        clear_session_override()

@@ -915,6 +915,24 @@ def post_resume(
                 **(campaign.send_settings or {}),
                 "pause_reason": None,
             }
+        elif (
+            mode == "autopilot"
+            and result.get("reason_code")
+            in ("autopilot_day_disabled", "autopilot_outside_window")
+        ):
+            # A closed campaign resumed outside its window is accepted and
+            # scheduled for the next valid window, rather than reported as a
+            # failed resume and left stopped.
+            campaign.status = "autopilot"
+            campaign.scheduled_at = next_autopilot_run(
+                session,
+                campaign,
+                now=utcnow(),
+            )
+            campaign.send_settings = {
+                **(campaign.send_settings or {}),
+                "pause_reason": result["reason_code"],
+            }
         elif resuming_closed and not result.get("created"):
             # A closed campaign that queued nothing keeps its previous status,
             # whatever blocked it. It can be resumed again once that clears.
@@ -938,8 +956,6 @@ def post_resume(
                     "pause_reason": result.get("reason_code", "daily_caps_reached"),
                 }
         elif result.get("reason_code") in (
-            "autopilot_day_disabled",
-            "autopilot_outside_window",
             "senders_temporarily_unavailable",
             "no_connected_senders",
             "sender_unavailable",
