@@ -34,6 +34,8 @@ interface Campaign {
   bounced_count?: number;
   send_error_count?: number;
   skipped_count?: number;
+  /** Recipients without a delivery result, used to offer "Resume campaign". */
+  pending_count?: number;
   updated_at?: string;
 }
 
@@ -288,6 +290,16 @@ function CampaignsContent() {
                               Resume campaign
                             </MenuAction>
                           )}
+                          {["ended", "stopped"].includes(item.status) &&
+                            (item.pending_count ?? 0) > 0 && (
+                              <MenuAction
+                                onClick={() =>
+                                  void runCampaignAction(item, "resume")
+                                }
+                              >
+                                Resume campaign
+                              </MenuAction>
+                            )}
                           {["sending", "scheduled", "autopilot"].includes(
                             item.status,
                           ) && (

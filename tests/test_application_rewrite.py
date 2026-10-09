@@ -1744,7 +1744,7 @@ def test_pre_send_failure_persists_attempts_and_stops_retrying(tmp_path, monkeyp
     session.close()
 
 
-def test_missing_exact_template_header_stops_campaign_before_gmail(tmp_path, monkeypatch):
+def test_missing_exact_template_header_skips_recipient_without_stopping_campaign(tmp_path, monkeypatch):
     session_factory = make_session_factory(tmp_path)
     session = session_factory()
     ensure_user(session, USER_ID)
@@ -1798,20 +1798,19 @@ def test_missing_exact_template_header_stops_campaign_before_gmail(tmp_path, mon
 
     result = platform_jobs.perform_send_job(job_id)
 
-    assert result["status"] == "failed"
+    assert result["status"] == "skipped"
     session = session_factory()
-    assert session.get(SendJob, job_id).attempts == 1
-    assert session.get(SendJob, job_id).status == "failed"
-    assert session.get(CampaignRecipient, {"campaign_id": campaign_id, "contact_id": contact_id}).status == "failed"
-    stopped_campaign = session.get(Campaign, campaign_id)
-    assert stopped_campaign.status == "stopped"
-    assert stopped_campaign.send_settings["pause_reason"] == "template_variables_missing"
+    assert session.get(SendJob, job_id) is None
+    assert session.get(CampaignRecipient, {"campaign_id": campaign_id, "contact_id": contact_id}).status == "skipped"
+    resumed_campaign = session.get(Campaign, campaign_id)
+    assert resumed_campaign.status == "ended"
+    assert resumed_campaign.send_settings.get("pause_reason") is None
     recovered_sender = session.get(Sender, sender_id)
     assert recovered_sender.last_error is None
     assert recovered_sender.recent_error_at is None
-    failed_log = session.scalar(select(SendLog).where(SendLog.campaign_id == campaign_id))
-    assert failed_log.status == "failed"
-    assert "First Name" in failed_log.error_message
+    skipped_log = session.scalar(select(SendLog).where(SendLog.campaign_id == campaign_id))
+    assert skipped_log.status == "skipped"
+    assert "First Name" in skipped_log.error_message
     session.close()
 
 
@@ -2738,6 +2737,282 @@ def test_active_campaign_rejects_new_start_modes_and_invalid_controls(tmp_path):
         clear_session_override()
 
 
+def test_resuming_a_completed_campaign_queues_only_new_recipients(tmp_path):
+    session_factory = make_session_factory(tmp_path)
+    install_session_override(session_factory)
+    try:
+        campaign_id, _, original_contact_ids = _seed_delivery_campaign(session_factory, recipient_count=2)
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        campaign.status = "ended"
+        campaign.send_settings = {"mode": "send_now", "delay_minutes": 5}
+        for contact_id in original_contact_ids:
+            session.get(
+                CampaignRecipient,
+                {"campaign_id": campaign_id, "contact_id": contact_id},
+            ).status = "sent"
+        added_contact = Contact(
+            user_id=USER_ID,
+            email_normalized="added-after-completion@example.com",
+            status="approved",
+            custom_fields={"first_name": "Added"},
+        )
+        session.add(added_contact)
+        session.flush()
+        session.add(
+            CampaignRecipient(
+                campaign_id=campaign_id,
+                contact_id=added_contact.id,
+                status="approved",
+            )
+        )
+        session.commit()
+        added_contact_id = added_contact.id
+        session.close()
+
+        client = TestClient(app)
+        progress = client.get(
+            f"/api/campaigns/{campaign_id}/send-progress",
+            headers=HEADERS,
+        ).json()
+        assert progress["campaign_status"] == "ended"
+        assert progress["resumable"] is True
+
+        response = client.post(f"/api/campaigns/{campaign_id}/resume", headers=HEADERS)
+        assert response.status_code == 200
+        assert response.json()["status"] == "sending"
+        assert response.json()["queued"] == 1
+
+        session = session_factory()
+        assert session.get(Campaign, campaign_id).status == "sending"
+        jobs = list(session.scalars(select(SendJob).where(SendJob.campaign_id == campaign_id)))
+        assert [job.recipient_id for job in jobs] == [added_contact_id]
+        assert session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": added_contact_id},
+        ).status == "queued"
+        for contact_id in original_contact_ids:
+            assert session.get(
+                CampaignRecipient,
+                {"campaign_id": campaign_id, "contact_id": contact_id},
+            ).status == "sent"
+        session.close()
+    finally:
+        clear_session_override()
+
+
+def test_completed_campaign_without_new_recipients_cannot_resume(tmp_path):
+    session_factory = make_session_factory(tmp_path)
+    install_session_override(session_factory)
+    try:
+        campaign_id, _, contact_ids = _seed_delivery_campaign(session_factory, recipient_count=2)
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        campaign.status = "ended"
+        for contact_id in contact_ids:
+            session.get(
+                CampaignRecipient,
+                {"campaign_id": campaign_id, "contact_id": contact_id},
+            ).status = "sent"
+        session.commit()
+        session.close()
+
+        client = TestClient(app)
+        progress = client.get(
+            f"/api/campaigns/{campaign_id}/send-progress",
+            headers=HEADERS,
+        ).json()
+        assert progress["resumable"] is False
+
+        response = client.post(f"/api/campaigns/{campaign_id}/resume", headers=HEADERS)
+        assert response.status_code == 409
+        assert "already has a delivery result" in response.json()["detail"]
+
+        session = session_factory()
+        assert session.get(Campaign, campaign_id).status == "ended"
+        assert session.scalar(select(SendJob.id).where(SendJob.campaign_id == campaign_id)) is None
+        session.close()
+    finally:
+        clear_session_override()
+
+
+def test_blocked_sender_day_does_not_retire_campaign_that_still_has_recipients(tmp_path):
+    session_factory = make_session_factory(tmp_path)
+    install_session_override(session_factory)
+    try:
+        campaign_id, sender_ids, _ = _seed_delivery_campaign(session_factory, recipient_count=2)
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        campaign.status = "sending"
+        campaign.send_settings = {"mode": "send_now", "delay_minutes": 0}
+        for sender_id in sender_ids:
+            sender = session.get(Sender, sender_id)
+            sender.daily_cap = 1
+            sender.recent_error_at = utcnow()
+        session.commit()
+        session.close()
+
+        response = TestClient(app).post(
+            f"/api/campaigns/{campaign_id}/send-now",
+            json={"dry_run": True},
+            headers=HEADERS,
+        )
+        assert response.status_code == 409
+
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        # The campaign must stay recoverable: it neither ends nor loses the
+        # recipients the senders could not take today.
+        assert campaign.status == "sending"
+        assert session.scalar(select(SendJob.id).where(SendJob.campaign_id == campaign_id)) is None
+        assert session.scalar(
+            select(func.count())
+            .select_from(CampaignRecipient)
+            .where(
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == "approved",
+            )
+        ) == 2
+        session.close()
+    finally:
+        clear_session_override()
+
+
+def test_batch_creation_only_reports_exhausted_without_eligible_recipients(tmp_path):
+    """A blocked pass is not "exhausted"; one with work left queued is."""
+    session_factory = make_session_factory(tmp_path)
+    try:
+        campaign_id, sender_ids, contact_ids = _seed_delivery_campaign(session_factory, recipient_count=2)
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        campaign.status = "sending"
+        for contact_id in contact_ids:
+            session.get(
+                CampaignRecipient,
+                {"campaign_id": campaign_id, "contact_id": contact_id},
+            ).status = "sent"
+        session.add_all(
+            [
+                SendJob(
+                    user_id=USER_ID,
+                    campaign_id=campaign_id,
+                    recipient_id=contact_ids[0],
+                    sender_id=sender_ids[0],
+                    status="sent",
+                    scheduled_for=utcnow(),
+                    batch_id="exhausted-sent",
+                    idempotency_key=f"campaign:{campaign_id}:recipient:{contact_ids[0]}",
+                ),
+                SendJob(
+                    user_id=USER_ID,
+                    campaign_id=campaign_id,
+                    recipient_id=contact_ids[1],
+                    sender_id=sender_ids[1],
+                    status="failed",
+                    scheduled_for=utcnow(),
+                    batch_id="exhausted-failed",
+                    idempotency_key=f"campaign:{campaign_id}:recipient:{contact_ids[1]}",
+                ),
+            ]
+        )
+        session.commit()
+
+        family_result = create_send_jobs_for_next_batch(
+            session,
+            user_id=USER_ID,
+            campaign_id=campaign_id,
+        )
+        assert family_result["exhausted"] is True
+
+        added_contact = Contact(
+            user_id=USER_ID,
+            email_normalized="added-later@example.com",
+            status="approved",
+            custom_fields={"first_name": "Later"},
+        )
+        session.add(added_contact)
+        session.flush()
+        added_contact_id = added_contact.id
+        session.add(
+            CampaignRecipient(
+                campaign_id=campaign_id,
+                contact_id=added_contact_id,
+                status="approved",
+            )
+        )
+        session.commit()
+
+        added_result = create_send_jobs_for_next_batch(
+            session,
+            user_id=USER_ID,
+            campaign_id=campaign_id,
+        )
+        assert added_result["exhausted"] is False
+        assert added_result["created"] == 1
+        assert added_result["job_ids"]
+        session.commit()
+        session.close()
+
+        session = session_factory()
+        queued_recipient = session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": added_contact_id},
+        )
+        assert queued_recipient.status == "queued"
+        session.close()
+    finally:
+        clear_session_override()
+
+
+def test_finished_campaign_stays_finished_while_senders_are_unavailable(tmp_path):
+    """A blocked resume must not turn a completed campaign into a paused one."""
+    session_factory = make_session_factory(tmp_path)
+    install_session_override(session_factory)
+    try:
+        campaign_id, sender_ids, contact_ids = _seed_delivery_campaign(session_factory, recipient_count=1)
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        campaign.status = "ended"
+        campaign.send_settings = {"mode": "send_now", "delay_minutes": 5}
+        session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": contact_ids[0]},
+        ).status = "sent"
+        added_contact = Contact(
+            user_id=USER_ID,
+            email_normalized="blocked-resume@example.com",
+            status="approved",
+            custom_fields={"first_name": "Blocked"},
+        )
+        session.add(added_contact)
+        session.flush()
+        session.add(
+            CampaignRecipient(
+                campaign_id=campaign_id,
+                contact_id=added_contact.id,
+                status="approved",
+            )
+        )
+        for sender_id in sender_ids:
+            sender = session.get(Sender, sender_id)
+            sender.daily_cap = 1
+            sender.recent_error_at = utcnow()
+        session.commit()
+        session.close()
+
+        response = TestClient(app).post(f"/api/campaigns/{campaign_id}/resume", headers=HEADERS)
+        assert response.status_code == 409
+
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        assert campaign.status == "ended"
+        assert campaign.send_settings["pause_reason"] == "senders_temporarily_unavailable"
+        assert session.scalar(select(SendJob.id).where(SendJob.campaign_id == campaign_id)) is None
+        session.close()
+    finally:
+        clear_session_override()
+
+
 def test_stop_cancels_queued_jobs_but_preserves_claimed_job(tmp_path):
     session_factory = make_session_factory(tmp_path)
     install_session_override(session_factory)
@@ -3475,3 +3750,150 @@ def test_credential_decryption_reports_key_mismatch(monkeypatch):
 
 def test_empty_delivery_exception_gets_actionable_detail():
     assert platform_jobs._exception_detail(RuntimeError()) == "RuntimeError: RuntimeError()"
+
+
+def test_send_logs_filter_by_engagement_and_include_gmail_thread_ids(tmp_path):
+    session_factory = make_session_factory(tmp_path)
+    install_session_override(session_factory)
+    try:
+        campaign_id, sender_ids, contact_ids = _seed_delivery_campaign(
+            session_factory,
+            recipient_count=4,
+        )
+        session = session_factory()
+        session.add_all(
+            [
+                SendLog(
+                    user_id=USER_ID,
+                    campaign_id=campaign_id,
+                    contact_id=contact_id,
+                    recipient_id=contact_id,
+                    sender_id=sender_ids[0],
+                    recipient_email=f"lead{index + 1}@example.com",
+                    sender_email="sender1@example.com",
+                    subject="Campaign subject",
+                    status="sent",
+                    gmail_thread_id=f"gmail-thread-{index + 1}",
+                    open_count=1 if index in {0, 2} else 0,
+                    click_count=1 if index in {1, 2} else 0,
+                    response_status=(
+                        "replied" if index == 2 else "automated_response" if index == 3 else None
+                    ),
+                    sent_at=utcnow(),
+                )
+                for index, contact_id in enumerate(contact_ids)
+            ]
+        )
+        session.commit()
+        session.close()
+
+        client = TestClient(app)
+        all_logs = client.get(
+            f"/api/campaigns/{campaign_id}/send-logs",
+            headers=HEADERS,
+        ).json()
+        clicked = client.get(
+            f"/api/campaigns/{campaign_id}/send-logs?engagement=clicked&page_size=1",
+            headers=HEADERS,
+        ).json()
+        opened = client.get(
+            f"/api/campaigns/{campaign_id}/send-logs?engagement=opened",
+            headers=HEADERS,
+        ).json()
+        replied = client.get(
+            f"/api/campaigns/{campaign_id}/send-logs?engagement=replied",
+            headers=HEADERS,
+        ).json()
+
+        assert all_logs["total"] == 4
+        assert {item["gmail_thread_id"] for item in all_logs["items"]} == {
+            f"gmail-thread-{index + 1}" for index in range(4)
+        }
+        assert clicked["total"] == 2
+        assert clicked["pages"] == 2
+        assert {item["recipient_email"] for item in clicked["items"]} <= {
+            "lead2@example.com",
+            "lead3@example.com",
+        }
+        assert {item["recipient_email"] for item in opened["items"]} == {
+            "lead1@example.com",
+            "lead3@example.com",
+        }
+        assert {item["recipient_email"] for item in replied["items"]} == {
+            "lead3@example.com",
+            "lead4@example.com",
+        }
+    finally:
+        clear_session_override()
+
+
+def test_stopped_campaign_resume_reuses_queued_jobs_after_an_error(tmp_path):
+    session_factory = make_session_factory(tmp_path)
+    install_session_override(session_factory)
+    try:
+        campaign_id, sender_ids, contact_ids = _seed_delivery_campaign(
+            session_factory,
+            recipient_count=3,
+        )
+        session = session_factory()
+        campaign = session.get(Campaign, campaign_id)
+        campaign.status = "stopped"
+        campaign.send_settings = {"mode": "send_now", "delay_minutes": 5}
+        session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": contact_ids[0]},
+        ).status = "sent"
+        session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": contact_ids[1]},
+        ).status = "failed"
+        session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": contact_ids[2]},
+        ).status = "queued"
+        session.add(
+            SendJob(
+                user_id=USER_ID,
+                campaign_id=campaign_id,
+                recipient_id=contact_ids[2],
+                sender_id=sender_ids[0],
+                status="queued",
+                scheduled_for=utcnow(),
+                batch_id="stopped-resume",
+                idempotency_key=f"campaign:{campaign_id}:recipient:{contact_ids[2]}",
+            )
+        )
+        session.commit()
+        session.close()
+
+        client = TestClient(app)
+        progress = client.get(
+            f"/api/campaigns/{campaign_id}/send-progress",
+            headers=HEADERS,
+        ).json()
+        assert progress["resumable"] is True
+        assert progress["queued_count"] == 1
+        response = client.post(
+            f"/api/campaigns/{campaign_id}/resume",
+            headers=HEADERS,
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "sending"
+        assert response.json()["queued"] == 1
+
+        session = session_factory()
+        assert session.get(Campaign, campaign_id).status == "sending"
+        jobs = list(session.scalars(select(SendJob).where(SendJob.campaign_id == campaign_id)))
+        assert len(jobs) == 1
+        assert jobs[0].recipient_id == contact_ids[2]
+        assert session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": contact_ids[0]},
+        ).status == "sent"
+        assert session.get(
+            CampaignRecipient,
+            {"campaign_id": campaign_id, "contact_id": contact_ids[1]},
+        ).status == "failed"
+        session.close()
+    finally:
+        clear_session_override()

@@ -156,6 +156,11 @@ function CampaignEditor() {
   } = useSWR(
     campaignId ? `${API_URL}/api/campaigns/${campaignId}/summary` : null,
   );
+  // Shared SWR key with the overview: stopped or ended campaigns offer
+  // "Resume sending" while recipients still need delivery.
+  const { data: deliveryProgress } = useSWR<{ resumable?: boolean }>(
+    campaignId ? `${API_URL}/api/campaigns/${campaignId}/send-progress` : null,
+  );
 
   const { data: valSummary, mutate: mutateValSummary } = useSWR(
     campaignId
@@ -207,6 +212,9 @@ function CampaignEditor() {
   const isPaused = campaign?.status === "paused";
   const isAutopilotRunning = campaign?.status === "autopilot";
   const hasActiveDeliveryControls = editingLocked || isPaused;
+  const canResume =
+    ["ended", "stopped"].includes(campaign?.status || "") &&
+    Boolean(deliveryProgress?.resumable);
   const schedule = useScheduleDraft(campaignId, summary, editingLocked);
   const launchingRef = useRef(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -1297,10 +1305,14 @@ function CampaignEditor() {
                     ? isPaused
                       ? "Sending is paused. You can edit the message, audience, and schedule before resuming."
                       : campaign.status === "ended"
-                        ? "Delivery is finished. Every recipient has a final result."
+                        ? canResume
+                          ? "Delivery is finished for everyone already sent. Resume sending to reach the recipients you added."
+                          : "Delivery is finished. Every recipient has a final result."
                         : campaign.status === "stopped"
-                          ? "Sending is stopped. Your results and activity are saved."
-                        : "New emails send according to your campaign schedule."
+                          ? canResume
+                            ? "Sending stopped before every recipient had a result. Resume sending to continue with the recipients still waiting."
+                            : "Sending is stopped. Your results and activity are saved."
+                          : "New emails send according to your campaign schedule."
                     : isPaused
                       ? "Sending is paused. Changes save now and apply when you resume."
                     : isAutopilotRunning
@@ -1358,6 +1370,20 @@ function CampaignEditor() {
                     Edit campaign
                   </button>
                 )}
+                {canResume && (
+                  <button
+                    className="campaign-button is-primary"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => void handleCampaignAction("resume")}
+                  >
+                    {busyAction === "resume" ? (
+                      <Loader2 size={19} className="animate-spin" />
+                    ) : (
+                      <Play size={19} />
+                    )}
+                    {busyAction === "resume" ? "Resuming…" : "Resume sending"}
+                  </button>
+                )}
                 {moreMenu}
               </div>
             </div>
@@ -1371,6 +1397,12 @@ function CampaignEditor() {
                     ? () => setAutopilotLimitsOpen(true)
                     : undefined
                 }
+                onResume={
+                  canResume
+                    ? () => void handleCampaignAction("resume")
+                    : undefined
+                }
+                resuming={busyAction === "resume"}
               />
             )}
             {tab === "message" && messagePanel}

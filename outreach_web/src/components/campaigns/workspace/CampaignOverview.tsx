@@ -16,6 +16,7 @@ import {
   AlertCircle,
   ArrowRight,
   Loader2,
+  Play,
   SlidersHorizontal,
 } from "lucide-react";
 import { formatViewerWindow } from "@/lib/timezones";
@@ -43,6 +44,8 @@ export interface CampaignProgress {
   is_active: boolean;
   is_sending: boolean;
   is_waiting: boolean;
+  /** True when a closed campaign has recipients waiting to continue. */
+  resumable?: boolean;
   next_batch_at: string | null;
   current_recipient: string | null;
   pause_reason: string | null;
@@ -284,11 +287,15 @@ export default function CampaignOverview({
   summary,
   onActivity,
   onEditDailyLimits,
+  onResume,
+  resuming = false,
 }: {
   campaignId: string;
   summary?: ScheduleSummary;
   onActivity: () => void;
   onEditDailyLimits?: () => void;
+  onResume?: () => void;
+  resuming?: boolean;
 }) {
   const {
     data: progress,
@@ -305,6 +312,7 @@ export default function CampaignOverview({
       custom_fields: Record<string, unknown>;
       status: string;
     }[];
+    total?: number;
   }>(
     `${API_URL}/api/campaigns/${campaignId}/recipients?page=1&page_size=3&pending_only=true`,
     { refreshInterval: 3000 },
@@ -354,6 +362,9 @@ export default function CampaignOverview({
     { value: progress.skipped_count, label: "skipped", style: "is-muted" },
     { value: delivery.remainingCount, label: "remaining", style: "" },
   ];
+  // Recipients already accepted for sending. This excludes send errors, which
+  // are summary-only and are not re-queued by "Resume sending".
+  const pendingCount = recipients?.total ?? delivery.remainingCount;
   const responseStats = [
     { value: progress.replied_count, label: "human replies", style: "is-blue" },
     { value: progress.automated_response_count, label: "automated replies", style: "is-amber" },
@@ -367,6 +378,38 @@ export default function CampaignOverview({
       {progress.dry_run && (
         <div className="campaign-notice">
           Test mode is active. No real emails are being sent.
+        </div>
+      )}
+      {progress.resumable && ["ended", "stopped"].includes(progress.campaign_status) && (
+        <div className="campaign-notice is-resume" role="status">
+          <div>
+            <strong>
+              {pendingCount} recipient
+              {pendingCount === 1 ? " has" : "s have"} no delivery result yet.
+            </strong>
+            <span>
+              {progress.campaign_status === "ended"
+                ? "Delivery is finished. Resume sending to reach the recipients you added."
+                : progress.campaign_status === "stopped"
+                  ? "Sending stopped before every recipient had a result. Resume sending to continue with the recipients still waiting."
+                  : "Resume sending when you are ready to continue."}
+            </span>
+          </div>
+          {onResume && (
+            <button
+              className="campaign-button is-primary"
+              type="button"
+              onClick={onResume}
+              disabled={resuming}
+            >
+              {resuming ? (
+                <Loader2 size={17} className="animate-spin" />
+              ) : (
+                <Play size={17} />
+              )}
+              {resuming ? "Resuming…" : "Resume sending"}
+            </button>
+          )}
         </div>
       )}
       <div className="campaign-overview-grid">

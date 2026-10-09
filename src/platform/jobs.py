@@ -76,13 +76,29 @@ def _campaign_email_attachments(session: Session, campaign: Campaign) -> tuple[E
     return tuple(attachments)
 
 
-def _has_unsent_approved_recipients(session: Session, campaign: Campaign) -> bool:
+def has_unsent_approved_recipients(
+    session: Session,
+    campaign: Campaign,
+    *,
+    user_id: str | None = None,
+    include_failed: bool = False,
+) -> bool:
+    """Report whether a batch could still queue new work for this campaign.
+
+    This mirrors the eligibility rule in :func:`create_send_jobs_for_next_batch`,
+    so callers can tell "nothing left to send" apart from "temporarily blocked".
+    Set ``include_failed`` only for starting paths that reopen failed
+    recipients first.
+    """
+    blocked_statuses = ("queued", "running", "retry", "sent")
+    if include_failed:
+        blocked_statuses = (*blocked_statuses, "failed")
     existing_job = (
         select(SendJob.id)
         .where(
             SendJob.campaign_id == campaign.id,
             SendJob.recipient_id == CampaignRecipient.contact_id,
-            SendJob.status.in_(("queued", "running", "retry", "sent", "failed")),
+            SendJob.status.in_(blocked_statuses),
         )
         .exists()
     )
@@ -92,12 +108,21 @@ def _has_unsent_approved_recipients(session: Session, campaign: Campaign) -> boo
         .where(
             CampaignRecipient.campaign_id == campaign.id,
             CampaignRecipient.status == "approved",
-            Contact.user_id == campaign.user_id,
+            Contact.user_id == (user_id or campaign.user_id),
             Contact.status.in_(("approved", "sent")),
             ~existing_job,
         )
         .limit(1)
     ) is not None
+
+
+def _has_unsent_approved_recipients(session: Session, campaign: Campaign) -> bool:
+    """Report whether the campaign could still queue work, including retries.
+
+    A failed recipient keeps its job and can still be reopened, so it counts as
+    work that is not finished yet.
+    """
+    return has_unsent_approved_recipients(session, campaign, include_failed=True)
 
 
 def _schedule_after_finished_batch(session: Session, job: SendJob, finished_at: datetime) -> None:
@@ -291,10 +316,17 @@ def create_send_jobs_for_next_batch(
         )
     )
     if not recipients:
+        # Nothing queued this pass. It is only "exhausted" when no eligible
+        # recipient is left at all; a blocked day or cap must not end the
+        # campaign, and a later recipient import must be able to resume it.
         return {
             "created": 0,
             "queued": 0,
-            "exhausted": True,
+            "exhausted": not has_unsent_approved_recipients(
+                session,
+                campaign,
+                user_id=user_id,
+            ),
             "reason": "No unsent approved recipients are ready",
         }
 
@@ -449,9 +481,37 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
                 if variable not in missing_variables:
                     missing_variables.append(variable)
         if missing_variables:
-            job.attempts += 1
+            # Skip this recipient — their CSV is missing required template fields.
+            # The campaign must NOT stop; the next recipient should still be sent.
+            error_detail = str(MissingTemplateVariablesError(missing_variables))
+            logger.warning(
+                "job %s skipping recipient %s: %s",
+                job_id,
+                contact.email_normalized,
+                error_detail,
+            )
+            sender.last_error = None
+            sender.recent_error_at = None
+            recipient.status = "skipped"
+            session.add(
+                SendLog(
+                    user_id=job.user_id,
+                    campaign_id=job.campaign_id,
+                    contact_id=job.recipient_id,
+                    recipient_id=job.recipient_id,
+                    sender_id=job.sender_id,
+                    recipient_email=contact.email_normalized,
+                    sender_email=sender.email,
+                    subject=campaign.subject_template,
+                    body_snapshot=campaign.body_template,
+                    status="skipped",
+                    error_message=error_detail,
+                )
+            )
+            session.delete(job)
+            _schedule_after_finished_batch(session, job, utcnow())
             session.commit()
-            raise MissingTemplateVariablesError(missing_variables)
+            return {"status": "skipped", "job_id": job_id, "reason": error_detail}
 
         now = utcnow()
         job.scheduled_for = now
@@ -539,8 +599,7 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
         session.rollback()
         job = session.get(SendJob, job_id)
         if job:
-            template_failure = isinstance(exc, MissingTemplateVariablesError)
-            final_failure = template_failure or job.attempts >= job.max_attempts
+            final_failure = job.attempts >= job.max_attempts
             job.status = "failed" if final_failure else "retry"
             job.error_message = error_detail
             job.locked_at = None
@@ -554,12 +613,8 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
                     attempt_log.error_message = error_detail
             sender = session.get(Sender, job.sender_id)
             if sender:
-                if template_failure:
-                    sender.last_error = None
-                    sender.recent_error_at = None
-                else:
-                    sender.last_error = error_detail
-                    sender.recent_error_at = utcnow()
+                sender.last_error = error_detail
+                sender.recent_error_at = utcnow()
             if final_failure:
                 recipient = session.get(
                     CampaignRecipient,
@@ -567,34 +622,7 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
                 )
                 if recipient:
                     recipient.status = "failed"
-            if template_failure:
-                campaign = session.get(Campaign, job.campaign_id)
-                contact = session.get(Contact, job.recipient_id)
-                if campaign:
-                    campaign.status = "stopped"
-                    campaign.scheduled_at = None
-                    campaign.send_settings = {
-                        **(campaign.send_settings or {}),
-                        "pause_reason": "template_variables_missing",
-                    }
-                if not attempt_log_id and campaign and contact:
-                    session.add(
-                        SendLog(
-                            user_id=job.user_id,
-                            campaign_id=job.campaign_id,
-                            contact_id=job.recipient_id,
-                            recipient_id=job.recipient_id,
-                            sender_id=job.sender_id,
-                            recipient_email=contact.email_normalized,
-                            sender_email=sender.email if sender else "",
-                            subject=campaign.subject_template,
-                            body_snapshot=campaign.body_template,
-                            status="failed",
-                            error_message=error_detail,
-                        )
-                    )
-            else:
-                _schedule_after_finished_batch(session, job, utcnow())
+            _schedule_after_finished_batch(session, job, utcnow())
             session.commit()
         return {"status": "failed", "job_id": job_id, "error": str(exc)}
     finally:

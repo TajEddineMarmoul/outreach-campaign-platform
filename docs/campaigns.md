@@ -83,5 +83,19 @@ stops future work; it cannot recall an email already handed to Gmail.
 Response and bounce information depend on Gmail activity synchronization and the
 sender's connection status. Simulated sends are excluded from delivery analytics.
 
+### Continue a campaign
+
+A campaign becomes **Completed** once every recipient has a final delivery
+result. Adding recipients afterwards does not send to them by itself: the
+overview shows how many recipients have no result yet, and **Resume sending**
+queues exactly those recipients. Everyone with a result keeps their history and
+is never emailed again by that resume.
+
+If a send error stops a batch, **Resume sending** continues with recipients
+still waiting, including jobs already queued. Recipients with a final result,
+including send errors, are not retried automatically. If senders are temporarily
+unavailable, the campaign keeps its stopped state and can be resumed again once
+a sender is available.
+
 Open **Menu → Help** to revisit guidance or show dismissed setup tips. Tip
 preferences are saved per user in the current browser.

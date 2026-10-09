@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { ChevronLeft, ChevronRight, Clock, Download, Loader2, MailOpen, MousePointerClick, PauseCircle, RefreshCw, Send } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clock, Download, ExternalLink, Loader2, MailOpen, MousePointerClick, PauseCircle, RefreshCw, Send } from "lucide-react";
 import { API_URL, checkResponse, errorMessage, useApiClient } from "@/lib/api";
 import { StatusBadge } from "@/components/app-ui";
 
@@ -11,6 +11,7 @@ interface LogEntry {
   recipient_email: string;
   sender_email: string;
   subject: string;
+  gmail_thread_id: string | null;
   status: string;
   response_status: string | null;
   open_count: number;
@@ -29,6 +30,13 @@ interface LogEntry {
 }
 
 interface LogsResponse { items: LogEntry[]; total: number; page: number; page_size: number; pages: number; }
+type EngagementFilter = "all" | "opened" | "clicked" | "replied";
+const ENGAGEMENT_FILTERS: { value: EngagementFilter; label: string }[] = [
+  { value: "all", label: "All activity" },
+  { value: "opened", label: "Opened" },
+  { value: "clicked", label: "Clicked" },
+  { value: "replied", label: "Replied" },
+];
 interface CampaignState {
   campaign_status: string;
   is_sending: boolean;
@@ -52,12 +60,17 @@ function activityDetail(log: LogEntry) {
   return "—";
 }
 
+function gmailThreadUrl(log: LogEntry) {
+  return `https://mail.google.com/mail/u/0/?authuser=${encodeURIComponent(log.sender_email)}#all/${encodeURIComponent(log.gmail_thread_id || "")}`;
+}
+
 export default function LogsSection({ campaignId }: { campaignId: string }) {
   const [page, setPage] = useState(1);
+  const [engagement, setEngagement] = useState<EngagementFilter>("all");
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState("");
   const { data, isLoading, mutate } = useSWR<LogsResponse>(
-    `${API_URL}/api/campaigns/${campaignId}/send-logs?page=${page}&page_size=10`
+    `${API_URL}/api/campaigns/${campaignId}/send-logs?page=${page}&page_size=10&engagement=${engagement}`
   );
   const { data: state, mutate: mutateState } = useSWR<CampaignState>(
     `${API_URL}/api/campaigns/${campaignId}/send-progress`,
@@ -100,7 +113,7 @@ export default function LogsSection({ campaignId }: { campaignId: string }) {
     }
   };
 
-  if (logs.length === 0 && !state?.is_waiting && !state?.is_sending && state?.campaign_status !== "paused") {
+  if (data?.total === 0 && engagement === "all" && !state?.is_waiting && !state?.is_sending && state?.campaign_status !== "paused") {
     return (
       <div className="text-center py-16">
         <p className="text-sm text-slate-400 mb-4">No send logs yet.</p>
@@ -157,6 +170,23 @@ export default function LogsSection({ campaignId }: { campaignId: string }) {
           </button>
         </div>
       </div>
+      <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Filter delivery activity">
+        <span className="mr-1 text-xs font-medium text-slate-500">Filter</span>
+        {ENGAGEMENT_FILTERS.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={engagement === option.value}
+            onClick={() => {
+              setPage(1);
+              setEngagement(option.value);
+            }}
+            className={`min-h-8 rounded-full border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${engagement === option.value ? "border-blue-700 bg-blue-700 text-white" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
       <div className="max-h-[calc(100vh-280px)] overflow-y-auto border border-slate-200 rounded-lg">
         <table className="w-full text-xs">
           <thead className="bg-slate-50 sticky top-0">
@@ -172,11 +202,35 @@ export default function LogsSection({ campaignId }: { campaignId: string }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {logs.map((log) => (
+            {logs.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
+                  {engagement === "all"
+                    ? "No delivery activity yet."
+                    : "No recipients match this filter."}
+                </td>
+              </tr>
+            ) : logs.map((log) => (
               <tr key={log.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-4 py-2.5 text-slate-700 max-w-[200px] truncate">{log.recipient_email}</td>
                 <td className="px-4 py-2.5 text-slate-500">{log.sender_email || "-"}</td>
-                <td className="px-4 py-2.5 text-slate-600 max-w-[250px] truncate">{log.subject}</td>
+                <td className="px-4 py-2.5 text-slate-600 max-w-[250px]">
+                  {log.gmail_thread_id ? (
+                    <a
+                      href={gmailThreadUrl(log)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open in Gmail"
+                      aria-label={`Open email to ${log.recipient_email} in Gmail`}
+                      className="inline-flex max-w-full items-center gap-1 text-blue-700 hover:text-blue-900 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    >
+                      <span className="truncate">{log.subject}</span>
+                      <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    </a>
+                  ) : (
+                    <span className="block truncate">{log.subject}</span>
+                  )}
+                </td>
                 <td className="px-4 py-2.5">
                   <StatusBadge status={log.status} title={log.error_message || undefined} />
                   {log.status === "failed" && log.attempt_count > 1 && (

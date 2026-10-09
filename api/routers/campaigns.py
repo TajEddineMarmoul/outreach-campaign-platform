@@ -129,7 +129,8 @@ def list_campaigns(conn=Depends(get_db), user_id: str = Depends(get_current_user
                 SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
                 SUM(CASE WHEN status = 'bounced' THEN 1 ELSE 0 END) AS bounced,
                 SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) AS send_errors,
-                SUM(CASE WHEN status IN ('rejected', 'skipped') THEN 1 ELSE 0 END) AS skipped
+                SUM(CASE WHEN status IN ('rejected', 'skipped') THEN 1 ELSE 0 END) AS skipped,
+                SUM(CASE WHEN status IS NULL OR status IN ('approved', 'pending', 'queued') THEN 1 ELSE 0 END) AS pending
             FROM campaign_recipients
             WHERE campaign_id = ?
             """,
@@ -140,6 +141,9 @@ def list_campaigns(conn=Depends(get_db), user_id: str = Depends(get_current_user
         d["bounced_count"] = counts["bounced"] or 0
         d["send_error_count"] = counts["send_errors"] or 0
         d["skipped_count"] = counts["skipped"] or 0
+        # Recipients without a delivery result. A finished campaign shows
+        # "Resume campaign" only while this is above zero.
+        d["pending_count"] = counts["pending"] or 0
         result.append(d)
     return result
 

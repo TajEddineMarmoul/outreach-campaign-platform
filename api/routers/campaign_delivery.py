@@ -19,7 +19,7 @@ from api.auth import get_current_user_id
 from api.delivery_safety import require_delivery_enabled
 from src.platform.gmail_activity import sync_selected_gmail_activity
 from src.platform.db import get_session
-from src.platform.jobs import create_send_jobs_for_next_batch
+from src.platform.jobs import create_send_jobs_for_next_batch, has_unsent_approved_recipients
 from src.platform.models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, EmailTrackingEvent, GmailActivityEvent, SendJob, SendLog, Sender
 from src.platform.scheduler import WEEKDAY_NAMES, next_autopilot_run
 from src.platform.services import autopilot_reschedule_state, campaign_daily_capacity, campaign_zone, connected_senders, ensure_user, require_group, serialize_group, user_zone, validate_timezone_name
@@ -130,6 +130,10 @@ class AutopilotDailyLimitsUpdate(BaseModel):
 
 
 EDIT_LOCKED_STATUSES = {"sending", "scheduled", "autopilot"}
+# Paused campaigns can retry failed recipients. Stopped/ended campaigns resume
+# pending work without automatically retrying recipients with a send error.
+RESUMABLE_STATUSES = {"paused", "ended", "stopped"}
+CLOSED_STATUSES = {"ended", "stopped"}
 
 
 def apply_campaign_timezone(
@@ -197,6 +201,20 @@ def queued_job_ids(session: Session, campaign_id: int, user_id: str) -> list[int
             .order_by(SendJob.id)
         )
     )
+
+
+def has_failed_recipients(session: Session, campaign_id: int, user_id: str) -> bool:
+    return session.scalar(
+        select(CampaignRecipient.contact_id)
+        .join(Contact, Contact.id == CampaignRecipient.contact_id)
+        .where(
+            CampaignRecipient.campaign_id == campaign_id,
+            CampaignRecipient.status == "failed",
+            Contact.user_id == user_id,
+            Contact.status.in_(("approved", "sent")),
+        )
+        .limit(1)
+    ) is not None
 
 
 def require_connected_delivery_group(session: Session, campaign: Campaign, user_id: str):
@@ -811,12 +829,54 @@ def post_resume(
     session: Session = Depends(get_session),
     user_id: str = Depends(get_current_user_id),
 ):
+    """Continue a campaign that paused or stopped with work still available.
+
+    A completed campaign can continue for newly added recipients. A stopped
+    campaign can also pick up jobs that were already queued when a send error
+    interrupted the batch. Recipients with a final result are left untouched.
+    """
     require_delivery_enabled()
     campaign = require_campaign(session, campaign_id, user_id)
-    if campaign.status != "paused":
-        raise HTTPException(status_code=409, detail=f"Cannot resume a campaign that is {campaign.status}")
-    mode = (campaign.send_settings or {}).get("mode", "send_now")
+    previous_status = campaign.status
+    if previous_status not in RESUMABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot resume a campaign that is {previous_status}",
+        )
+    resuming_closed = previous_status in CLOSED_STATUSES
     job_ids = queued_job_ids(session, campaign_id, user_id)
+    if resuming_closed:
+        has_pending_work = bool(job_ids) or has_unsent_approved_recipients(
+            session, campaign, user_id=user_id
+        )
+    else:
+        # A paused campaign resumes work that was already accepted, including
+        # recipients that failed and were left open for a retry.
+        has_pending_work = (
+            bool(job_ids)
+            or has_failed_recipients(session, campaign_id, user_id)
+            or has_unsent_approved_recipients(
+                session,
+                campaign,
+                user_id=user_id,
+                include_failed=True,
+            )
+        )
+    if not has_pending_work:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Every recipient already has a delivery result. "
+                "Add recipients to continue this campaign."
+            ),
+        )
+    mode = (campaign.send_settings or {}).get("mode", "send_now")
+    if resuming_closed:
+        # Closed campaigns keep retries explicit. Existing queued jobs resume
+        # as-is; new jobs are only created for recipients with no prior job.
+        retried_failed = 0
+    else:
+        retried_failed = reopen_failed_recipients(session, campaign_id, user_id)
     campaign.status = "autopilot" if mode == "autopilot" else "sending"
     resume_at = campaign.scheduled_at
     if resume_at and resume_at.tzinfo is None:
@@ -828,6 +888,7 @@ def post_resume(
             "status": "scheduled",
             "queued": 0,
             "scheduled_at": campaign.scheduled_at.isoformat(),
+            "retried_failed": retried_failed,
         }
     result: dict = {}
     if not job_ids:
@@ -842,10 +903,30 @@ def post_resume(
             session.rollback()
             raise HTTPException(status_code=400, detail=str(exc))
         job_ids = result.get("job_ids", [])
+        # Job creation writes each recipient inside a savepoint, so persist the
+        # queued recipients before the status decision below is applied.
+        session.commit()
         if result.get("exhausted"):
+            # Nothing is eligible yet. Keep the finished state instead of
+            # dropping the campaign into an active status with no work.
             campaign.status = "ended"
             campaign.scheduled_at = None
+            campaign.send_settings = {
+                **(campaign.send_settings or {}),
+                "pause_reason": None,
+            }
+        elif resuming_closed and not result.get("created"):
+            # A closed campaign that queued nothing keeps its previous status,
+            # whatever blocked it. It can be resumed again once that clears.
+            campaign.status = previous_status
+            campaign.scheduled_at = None
+            campaign.send_settings = {
+                **(campaign.send_settings or {}),
+                "pause_reason": result.get("reason_code"),
+            }
         elif result.get("reason_code") in ("daily_caps_reached", "campaign_daily_cap_reached"):
+            # Autopilot wakes up on its next scheduled day; the other modes
+            # wait for someone to free sender capacity.
             if mode == "autopilot":
                 campaign.status = "autopilot"
                 campaign.scheduled_at = next_autopilot_run(session, campaign, now=utcnow(), force_next_day=True)
@@ -856,9 +937,19 @@ def post_resume(
                     **(campaign.send_settings or {}),
                     "pause_reason": result.get("reason_code", "daily_caps_reached"),
                 }
-        elif result.get("reason_code") in ("autopilot_day_disabled", "autopilot_outside_window"):
-            campaign.status = "autopilot"
-            campaign.scheduled_at = next_autopilot_run(session, campaign, now=utcnow())
+        elif result.get("reason_code") in (
+            "autopilot_day_disabled",
+            "autopilot_outside_window",
+            "senders_temporarily_unavailable",
+            "no_connected_senders",
+            "sender_unavailable",
+        ):
+            if mode == "autopilot":
+                campaign.status = "autopilot"
+                campaign.scheduled_at = next_autopilot_run(session, campaign, now=utcnow())
+            else:
+                campaign.status = "paused"
+                campaign.scheduled_at = None
             campaign.send_settings = {
                 **(campaign.send_settings or {}),
                 "pause_reason": result["reason_code"],
@@ -870,6 +961,11 @@ def post_resume(
         }
     session.commit()
     if not job_ids:
+        if result.get("exhausted"):
+            raise HTTPException(
+                status_code=409,
+                detail=result.get("reason", "No email was queued"),
+            )
         if mode == "autopilot" and campaign.status == "autopilot":
             return {
                 "status": "autopilot",
@@ -881,8 +977,11 @@ def post_resume(
             status_code=409,
             detail=result.get("reason", "No email was queued"),
         )
-    return {"status": campaign.status, "queued": len(job_ids)}
-
+    return {
+        "status": campaign.status,
+        "queued": len(job_ids),
+        "retried_failed": retried_failed,
+    }
 
 @router.post("/api/campaigns/{campaign_id}/stop")
 def post_stop(
@@ -1068,6 +1167,19 @@ def get_campaign_send_progress(
     has_pending_work = sent + bounced + failed + skipped < total
     worker_managed = campaign.status in {"sending", "scheduled", "autopilot"}
     is_waiting = worker_managed and has_pending_work and not is_running and queued == 0
+    resumable = campaign.status in RESUMABLE_STATUSES and (
+        bool(queued_job_ids(session, campaign_id, user_id))
+        or (
+            campaign.status == "paused"
+            and has_failed_recipients(session, campaign_id, user_id)
+        )
+        or has_unsent_approved_recipients(
+            session,
+            campaign,
+            user_id=user_id,
+            include_failed=campaign.status == "paused",
+        )
+    )
     pause_reason = (campaign.send_settings or {}).get("pause_reason")
     day_schedules = list(
         session.scalars(
@@ -1100,6 +1212,9 @@ def get_campaign_send_progress(
         "failed_count": failed,
         "skipped_count": skipped,
         "queued_count": queued,
+        # True when a paused or closed campaign still has pending jobs or
+        # recipients to queue, so the workspace can offer "Resume sending".
+        "resumable": resumable,
         "is_active": worker_managed and has_pending_work,
         "is_sending": is_running,
         "is_waiting": is_waiting,
@@ -1176,15 +1291,25 @@ def get_campaign_send_logs(
     campaign_id: int,
     page: int = 1,
     page_size: int = 10,
+    engagement: Literal[
+        "all", "opened", "clicked", "replied"
+    ] = "all",
     session: Session = Depends(get_session),
     user_id: str = Depends(get_current_user_id),
 ):
     require_campaign(session, campaign_id, user_id)
     page = max(page, 1)
     page_size = min(max(page_size, 1), 50)
+    filters = [SendLog.campaign_id == campaign_id, SendLog.user_id == user_id]
+    if engagement == "opened":
+        filters.append(SendLog.open_count > 0)
+    elif engagement == "clicked":
+        filters.append(SendLog.click_count > 0)
+    elif engagement == "replied":
+        filters.append(SendLog.response_status.in_(("replied", "automated_response")))
     total = session.scalar(
         select(func.count()).select_from(SendLog)
-        .where(SendLog.campaign_id == campaign_id, SendLog.user_id == user_id)
+        .where(*filters)
     ) or 0
     attempt_partition = (SendLog.campaign_id, SendLog.recipient_id, SendLog.status)
     ranked_logs = (
@@ -1204,6 +1329,7 @@ def get_campaign_send_logs(
         session.execute(
             select(SendLog, ranked_logs.c.attempt_number, ranked_logs.c.attempt_count)
             .join(ranked_logs, ranked_logs.c.log_id == SendLog.id)
+            .where(*filters)
             .order_by(activity_at.desc(), SendLog.id.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
@@ -1216,6 +1342,7 @@ def get_campaign_send_logs(
                 "recipient_email": log.recipient_email,
                 "sender_email": log.sender_email,
                 "subject": log.subject,
+                "gmail_thread_id": log.gmail_thread_id,
                 "status": log.status,
                 "response_status": log.response_status,
                 "open_count": log.open_count,

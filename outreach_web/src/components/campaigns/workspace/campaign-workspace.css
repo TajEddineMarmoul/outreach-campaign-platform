@@ -1260,6 +1260,29 @@
   border-color: #efc6c6;
   background: #fff4f4;
 }
+/* A resumed campaign still has recipients to deliver to. */
+.campaign-notice.is-resume {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  border-color: #bfd6f6;
+  background: #f5f8ff;
+  color: #0b174b;
+}
+.campaign-notice.is-resume div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.campaign-notice.is-resume span {
+  color: #3c5687;
+}
+.campaign-notice.is-resume .campaign-button {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
 .campaign-notice button {
   margin-left: 12px;
   text-decoration: underline;
