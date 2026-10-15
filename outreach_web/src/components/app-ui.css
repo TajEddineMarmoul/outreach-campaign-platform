@@ -169,6 +169,62 @@
   background: #fff;
   font-size: 14px;
 }
+.app-filter-menu {
+  position: relative;
+  display: inline-block;
+}
+.app-filter-menu summary {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  list-style: revert;
+  white-space: nowrap;
+}
+.app-filter-menu-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 240px;
+  padding: 14px;
+  border: 1px solid var(--app-line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 28px rgb(18 38 72 / 14%);
+}
+.app-filter-menu-panel fieldset {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.app-filter-menu-panel legend {
+  margin-bottom: 12px;
+  color: var(--app-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+.app-filter-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 24px;
+  color: var(--app-ink);
+  cursor: pointer;
+  font-size: 14px;
+}
+.app-filter-menu-option input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--app-blue);
+}
+.app-filter-menu-panel p {
+  margin: 12px 0 0;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .app-count {
   margin-left: auto;
   color: var(--app-muted);

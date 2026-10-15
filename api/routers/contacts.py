@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
+import csv
 import json
-from io import BytesIO
+from io import BytesIO, StringIO
+from typing import Literal
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.deps import db, get_db, get_current_user_id
@@ -14,6 +17,108 @@ from src.dnc import add_email as dnc_add_email, rows as dnc_rows
 from src.importer import import_dataframe, normalize_email, is_do_not_contact
 
 router = APIRouter()
+
+ContactFilter = Literal["answered", "clicked", "ready", "undelivered"]
+
+
+def _query_list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _activity_predicates(campaign_id: int | None) -> dict[str, tuple[str, list]]:
+    log_scope = "sl.user_id = c.user_id AND (sl.recipient_id = c.id OR sl.contact_id = c.id)"
+    log_params: list = []
+    if campaign_id is not None:
+        log_scope += " AND sl.campaign_id = ?"
+        log_params.append(campaign_id)
+
+    if campaign_id is None:
+        answered = (
+            "(c.status = 'replied' OR EXISTS (SELECT 1 FROM send_log sl WHERE "
+            f"{log_scope} AND sl.response_status IN ('replied', 'automated_response')))"
+        )
+        undelivered = (
+            "(c.status = 'bounced' OR EXISTS (SELECT 1 FROM send_log sl WHERE "
+            f"{log_scope} AND sl.status = 'bounced'))"
+        )
+    else:
+        answered = (
+            "EXISTS (SELECT 1 FROM send_log sl WHERE "
+            f"{log_scope} AND (sl.response_status IN ('replied', 'automated_response') OR sl.status = 'replied'))"
+        )
+        undelivered = (
+            "(EXISTS (SELECT 1 FROM send_log sl WHERE "
+            f"{log_scope} AND sl.status = 'bounced') OR EXISTS ("
+            "SELECT 1 FROM campaign_recipients cr WHERE cr.contact_id = c.id "
+            "AND cr.campaign_id = ? AND cr.status = 'bounced'))"
+        )
+
+    clicked = (
+        "EXISTS (SELECT 1 FROM send_log sl WHERE "
+        f"{log_scope} AND sl.click_count > 0)"
+    )
+    clicked_params = [*log_params]
+    answered_params = [*log_params]
+    undelivered_params = [*log_params]
+    if campaign_id is not None:
+        undelivered_params.append(campaign_id)
+
+    if campaign_id is None:
+        ready = "c.status IN ('approved', 'sent')"
+        ready_params: list = []
+    else:
+        ready = (
+            "EXISTS (SELECT 1 FROM campaign_recipients cr WHERE cr.contact_id = c.id "
+            "AND cr.campaign_id = ? AND cr.status IN ('approved', 'pending', 'queued') "
+            "AND c.status IN ('approved', 'sent'))"
+        )
+        ready_params = [campaign_id]
+
+    return {
+        "answered": (answered, answered_params),
+        "clicked": (clicked, clicked_params),
+        "ready": (ready, ready_params),
+        "undelivered": (undelivered, undelivered_params),
+    }
+
+
+def _contact_where(
+    conn,
+    *,
+    user_id: str,
+    search: str,
+    campaign_id: int | None,
+    statuses: list[str],
+) -> tuple[str, list]:
+    where = "c.user_id = ?"
+    params: list = [user_id]
+    if campaign_id is not None:
+        if not db.get_campaign(conn, campaign_id, user_id):
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        where += " AND EXISTS (SELECT 1 FROM campaign_recipients cr WHERE cr.contact_id = c.id AND cr.campaign_id = ?)"
+        params.append(campaign_id)
+    if search.strip():
+        where += " AND (LOWER(c.email_normalized) LIKE ? OR LOWER(c.first_name) LIKE ? OR LOWER(c.last_name) LIKE ? OR LOWER(c.company_name) LIKE ?)"
+        params.extend([f"%{search.strip().lower()}%"] * 4)
+    if statuses:
+        predicates = _activity_predicates(campaign_id)
+        clauses = []
+        for status in dict.fromkeys(statuses):
+            predicate = predicates.get(status)
+            if predicate:
+                clause, clause_params = predicate
+                clauses.append(clause)
+                params.extend(clause_params)
+        if clauses:
+            where += " AND (" + " OR ".join(clauses) + ")"
+    return where, params
+
+
+def _csv_cell(value: object) -> str:
+    text = str(value or "")
+    if text.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
 
 class DNCAddRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -27,18 +132,12 @@ class ContactCreate(DNCAddRequest):
 
 @router.get("/api/contacts/library")
 def contact_library(search: str = Query(default="", max_length=200), campaign_id: int | None = None,
+                    statuses: list[ContactFilter] | None = Query(default=None),
                     page: int = Query(default=1, ge=1), page_size: int = Query(default=6, ge=1, le=100),
                     conn=Depends(get_db), user_id: str = Depends(get_current_user_id)):
-    where = "c.user_id = ?"
-    params = [user_id]
-    if campaign_id is not None:
-        if not db.get_campaign(conn, campaign_id, user_id):
-            raise HTTPException(status_code=404, detail="Campaign not found")
-        where += " AND EXISTS (SELECT 1 FROM campaign_recipients cr WHERE cr.contact_id = c.id AND cr.campaign_id = ?)"
-        params.append(campaign_id)
-    if search.strip():
-        where += " AND (LOWER(c.email_normalized) LIKE ? OR LOWER(c.first_name) LIKE ? OR LOWER(c.last_name) LIKE ? OR LOWER(c.company_name) LIKE ?)"
-        params.extend([f"%{search.strip().lower()}%"] * 4)
+    where, params = _contact_where(
+        conn, user_id=user_id, search=search, campaign_id=campaign_id, statuses=_query_list(statuses)
+    )
     total = conn.execute(f"SELECT COUNT(*) AS count FROM contacts c WHERE {where}", params).fetchone()["count"]
     rows = conn.execute(f"SELECT c.* FROM contacts c WHERE {where} ORDER BY c.id DESC LIMIT ? OFFSET ?", [*params, page_size, (page - 1) * page_size]).fetchall()
     items = []
@@ -53,6 +152,67 @@ def contact_library(search: str = Query(default="", max_length=200), campaign_id
         items.append({"id": item["id"], "email": item["email_normalized"], "first_name": item.get("first_name") or fields.get("first_name", ""),
                       "last_name": item.get("last_name") or fields.get("last_name", ""), "company": item.get("company_name") or fields.get("company", ""), "status": item["status"]})
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/api/contacts/export")
+def export_contacts(
+    search: str = Query(default="", max_length=200),
+    campaign_id: int | None = None,
+    statuses: list[ContactFilter] | None = Query(default=None),
+    contact_ids: list[int] | None = Query(default=None),
+    conn=Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    where, params = _contact_where(
+        conn, user_id=user_id, search=search, campaign_id=campaign_id, statuses=_query_list(statuses)
+    )
+    selected_contact_ids = _query_list(contact_ids)
+    if selected_contact_ids:
+        unique_contact_ids = list(dict.fromkeys(selected_contact_ids))
+        placeholders = ",".join("?" for _ in unique_contact_ids)
+        where += f" AND c.id IN ({placeholders})"
+        params.extend(unique_contact_ids)
+
+    predicates = _activity_predicates(campaign_id)
+    projections = []
+    projection_params: list = []
+    for name in ("answered", "clicked", "ready", "undelivered"):
+        predicate, predicate_params = predicates[name]
+        projections.append(f"CASE WHEN {predicate} THEN 'Yes' ELSE 'No' END AS {name}")
+        projection_params.extend(predicate_params)
+
+    rows = conn.execute(
+        f"""
+        SELECT c.id, c.email_normalized, c.first_name, c.last_name, c.company_name,
+               c.status, {', '.join(projections)}
+        FROM contacts c
+        WHERE {where}
+        ORDER BY c.id DESC
+        """,
+        [*projection_params, *params],
+    ).fetchall()
+
+    output = StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["Name", "Email", "Company", "Contact status", "Answered", "Clicked", "Ready", "Undelivered"])
+    for row in rows:
+        item = dict(row)
+        writer.writerow([
+            _csv_cell(f"{item.get('first_name') or ''} {item.get('last_name') or ''}".strip()),
+            _csv_cell(item.get("email_normalized")),
+            _csv_cell(item.get("company_name")),
+            _csv_cell(item.get("status")),
+            item["answered"],
+            item["clicked"],
+            item["ready"],
+            item["undelivered"],
+        ])
+
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="contacts.csv"'},
+    )
 
 
 @router.post("/api/contacts")

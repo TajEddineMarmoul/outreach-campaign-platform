@@ -15,7 +15,6 @@ import {
   Pager,
   SearchField,
   StatusBadge,
-  downloadCsv,
   formatDate,
 } from "@/components/app-ui";
 
@@ -39,12 +38,20 @@ interface Blocked {
   email: string;
   created_at?: string;
 }
+type ContactFilter = "answered" | "clicked" | "ready" | "undelivered";
+const contactFilters: { value: ContactFilter; label: string }[] = [
+  { value: "answered", label: "Answered" },
+  { value: "clicked", label: "Clicked" },
+  { value: "ready", label: "Ready" },
+  { value: "undelivered", label: "Undelivered" },
+];
 const emptyContact = { email: "", first_name: "", last_name: "", company: "" };
 
 export default function ContactsPage() {
   const { API_URL, authFetch } = useApiClient();
   const [search, setSearch] = useState("");
   const [group, setGroup] = useState("");
+  const [statuses, setStatuses] = useState<ContactFilter[]>([]);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<number[]>([]);
   const [dialog, setDialog] = useState<"add" | "import" | "dnc" | null>(null);
@@ -53,14 +60,15 @@ export default function ContactsPage() {
   const [blockEmail, setBlockEmail] = useState("");
   const [blockContact, setBlockContact] = useState<Contact | null>(null);
   const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [actionError, setActionError] = useState("");
   const [message, setMessage] = useState("");
-  const query = new URLSearchParams({
-    search,
-    page: String(page),
-    page_size: "6",
-  });
+  const query = new URLSearchParams();
+  query.set("search", search);
+  query.set("page", String(page));
+  query.set("page_size", "6");
   if (group) query.set("campaign_id", group);
+  statuses.forEach((status) => query.append("statuses", status));
   const { data, error, isLoading, mutate } = useSWR<Library>(
     `${API_URL}/api/contacts/library?${query}`,
   );
@@ -168,19 +176,39 @@ export default function ContactsPage() {
       setBusy(false);
     }
   };
-  const exportContacts = () => {
-    const rows = selected.length
-      ? items.filter((item) => selected.includes(item.id))
-      : items;
-    downloadCsv("contacts.csv", [
-      ["Name", "Email", "Company", "Status"],
-      ...rows.map((item) => [
-        `${item.first_name} ${item.last_name}`.trim(),
-        item.email,
-        item.company,
-        item.status,
-      ]),
-    ]);
+  const exportContacts = async () => {
+    setExporting(true);
+    setActionError("");
+    const exportQuery = new URLSearchParams();
+    exportQuery.set("search", search);
+    if (group) exportQuery.set("campaign_id", group);
+    statuses.forEach((status) => exportQuery.append("statuses", status));
+    selected.forEach((id) => exportQuery.append("contact_ids", String(id)));
+    try {
+      const response = await authFetch(
+        `${API_URL}/api/contacts/export?${exportQuery.toString()}`,
+      );
+      if (!response.ok) {
+        await checkResponse(response, "Couldn’t export contacts. Please try again.");
+        return;
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "contacts.csv";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setMessage(
+        selected.length
+          ? `Exported ${selected.length} selected contact${selected.length === 1 ? "" : "s"}.`
+          : `Exported ${data?.total ?? 0} contact${data?.total === 1 ? "" : "s"}.`,
+      );
+    } catch (error) {
+      setActionError(errorMessage(error, "Couldn’t export contacts. Please try again."));
+    } finally {
+      setExporting(false);
+    }
   };
   return (
     <div className="app-page">
@@ -199,10 +227,14 @@ export default function ContactsPage() {
               <MenuAction onClick={() => open("dnc")}>
                 Manage do not contact
               </MenuAction>
-              <MenuAction disabled={!items.length} onClick={exportContacts}>
+              <MenuAction disabled={!data?.total || exporting} onClick={() => void exportContacts()}>
                 {selected.length
                   ? "Export selected contacts"
-                  : "Export this page"}
+                  : exporting
+                    ? "Exporting…"
+                    : statuses.length || group || search
+                      ? "Export filtered contacts"
+                      : "Export all contacts"}
               </MenuAction>
             </ActionMenu>
           </>
@@ -227,6 +259,7 @@ export default function ContactsPage() {
           onChange={(event) => {
             setGroup(event.target.value);
             changePage(1);
+            setSelected([]);
           }}
         >
           <option value="">All groups</option>
@@ -236,6 +269,35 @@ export default function ContactsPage() {
             </option>
           ))}
         </select>
+        <details className="app-filter-menu">
+          <summary className="app-select">
+            Status: {statuses.length ? statuses.map((status) => contactFilters.find((item) => item.value === status)?.label).join(", ") : "All"}
+          </summary>
+          <div className="app-filter-menu-panel">
+            <fieldset>
+              <legend>Filter by status</legend>
+              {contactFilters.map((filter) => (
+                <label key={filter.value} className="app-filter-menu-option">
+                  <input
+                    type="checkbox"
+                    checked={statuses.includes(filter.value)}
+                    onChange={(event) => {
+                      setStatuses((current) =>
+                        event.target.checked
+                          ? [...current, filter.value]
+                          : current.filter((status) => status !== filter.value),
+                      );
+                      changePage(1);
+                      setSelected([]);
+                    }}
+                  />
+                  {filter.label}
+                </label>
+              ))}
+            </fieldset>
+            <p>Contacts matching any selected status are shown.</p>
+          </div>
+        </details>
         <span className="app-count">
           {selected.length
             ? `${selected.length} selected`
