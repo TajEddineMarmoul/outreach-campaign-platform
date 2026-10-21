@@ -54,7 +54,8 @@ export default function ContactsPage() {
   const [statuses, setStatuses] = useState<ContactFilter[]>([]);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<number[]>([]);
-  const [dialog, setDialog] = useState<"add" | "import" | "dnc" | null>(null);
+  const [dialog, setDialog] = useState<"add" | "import" | "dnc" | "export" | null>(null);
+  const [includeData, setIncludeData] = useState(true);
   const [draft, setDraft] = useState(emptyContact);
   const [file, setFile] = useState<File | null>(null);
   const [blockEmail, setBlockEmail] = useState("");
@@ -181,6 +182,7 @@ export default function ContactsPage() {
     setActionError("");
     const exportQuery = new URLSearchParams();
     exportQuery.set("search", search);
+    exportQuery.set("include_data", String(includeData));
     if (group) exportQuery.set("campaign_id", group);
     statuses.forEach((status) => exportQuery.append("statuses", status));
     selected.forEach((id) => exportQuery.append("contact_ids", String(id)));
@@ -196,9 +198,10 @@ export default function ContactsPage() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "contacts.csv";
+      link.download = includeData ? "contacts.csv" : "contact-emails.csv";
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setDialog(null);
       setMessage(
         selected.length
           ? `Exported ${selected.length} selected contact${selected.length === 1 ? "" : "s"}.`
@@ -227,7 +230,7 @@ export default function ContactsPage() {
               <MenuAction onClick={() => open("dnc")}>
                 Manage do not contact
               </MenuAction>
-              <MenuAction disabled={!data?.total || exporting} onClick={() => void exportContacts()}>
+              <MenuAction disabled={!data?.total || exporting} onClick={() => open("export")}>
                 {selected.length
                   ? "Export selected contacts"
                   : exporting
@@ -409,6 +412,74 @@ export default function ContactsPage() {
           onChange={changePage}
         />
       )}
+      <AppDialog
+        open={dialog === "export"}
+        onClose={() => {
+          if (!exporting) setDialog(null);
+        }}
+        title="Download contacts"
+        description={
+          selected.length
+            ? `Download ${selected.length} selected contact${selected.length === 1 ? "" : "s"}.`
+            : `Download all ${data?.total ?? 0} contacts matching your current search and filters.`
+        }
+      >
+        <form
+          className="app-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void exportContacts();
+          }}
+        >
+          <fieldset disabled={exporting} className="space-y-3">
+            <legend className="mb-3 text-sm font-semibold">Include in the CSV</legend>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3">
+              <input
+                type="radio"
+                name="export-content"
+                value="all-data"
+                checked={includeData}
+                onChange={() => setIncludeData(true)}
+                className="mt-1"
+              />
+              <span>
+                <span className="block text-sm font-semibold">With all contact data</span>
+                <span className="block text-sm text-slate-500">
+                  Names, company, greetings, keywords, sources, activity status and every other saved field.
+                </span>
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3">
+              <input
+                type="radio"
+                name="export-content"
+                value="emails-only"
+                checked={!includeData}
+                onChange={() => setIncludeData(false)}
+                className="mt-1"
+              />
+              <span>
+                <span className="block text-sm font-semibold">Emails only</span>
+                <span className="block text-sm text-slate-500">One email address per row, without other contact data.</span>
+              </span>
+            </label>
+          </fieldset>
+          <Notice error={actionError} />
+          <div className="app-dialog-actions">
+            <button
+              type="button"
+              className="app-button"
+              disabled={exporting}
+              onClick={() => setDialog(null)}
+            >
+              Cancel
+            </button>
+            <button className="app-button is-primary" disabled={exporting}>
+              {exporting ? "Downloading…" : "Download CSV"}
+            </button>
+          </div>
+        </form>
+      </AppDialog>
       <AppDialog
         open={dialog === "add"}
         onClose={() => {

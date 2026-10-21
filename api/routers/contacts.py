@@ -115,10 +115,38 @@ def _contact_where(
 
 
 def _csv_cell(value: object) -> str:
-    text = str(value or "")
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = "" if value is None else str(value)
     if text.lstrip().startswith(("=", "+", "-", "@")):
         return "'" + text
     return text
+
+
+def _export_custom_fields(value: object) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _export_column_name(name: str, used: set[str], reserved: set[str]) -> str:
+    """Keep source columns distinct from the built-in export columns."""
+    safe_name = _csv_cell(name)
+    if safe_name not in used:
+        used.add(safe_name)
+        return safe_name
+    candidate = f"CSV: {name}"
+    suffix = 2
+    while candidate in used or candidate in reserved:
+        candidate = f"CSV: {name} ({suffix})"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
 
 class DNCAddRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -160,6 +188,7 @@ def export_contacts(
     campaign_id: int | None = None,
     statuses: list[ContactFilter] | None = Query(default=None),
     contact_ids: list[int] | None = Query(default=None),
+    include_data: bool = True,
     conn=Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
@@ -183,35 +212,51 @@ def export_contacts(
 
     rows = conn.execute(
         f"""
-        SELECT c.id, c.email_normalized, c.first_name, c.last_name, c.company_name,
-               c.status, {', '.join(projections)}
+        SELECT c.*, {', '.join(projections)}
         FROM contacts c
         WHERE {where}
         ORDER BY c.id DESC
         """,
         [*projection_params, *params],
     ).fetchall()
+    items = [dict(row) for row in rows]
 
     output = StringIO(newline="")
     writer = csv.writer(output)
-    writer.writerow(["Name", "Email", "Company", "Contact status", "Answered", "Clicked", "Ready", "Undelivered"])
-    for row in rows:
-        item = dict(row)
-        writer.writerow([
-            _csv_cell(f"{item.get('first_name') or ''} {item.get('last_name') or ''}".strip()),
-            _csv_cell(item.get("email_normalized")),
-            _csv_cell(item.get("company_name")),
-            _csv_cell(item.get("status")),
-            item["answered"],
-            item["clicked"],
-            item["ready"],
-            item["undelivered"],
-        ])
+    if include_data:
+        headers = ["Name", "Email", "Company", "Contact status", "Answered", "Clicked", "Ready", "Undelivered"]
+        # Export every contact column except the tenant key. Custom fields are
+        # expanded below; their original JSON is also retained for lossless use.
+        covered = {"email_normalized", "company_name", "status", "user_id", "answered", "clicked", "ready", "undelivered"}
+        stored_keys = list(dict.fromkeys(key for item in items for key in item if key not in covered))
+        fields = [_export_custom_fields(item.get("custom_fields")) for item in items]
+        custom_keys = list(dict.fromkeys(str(key) for custom in fields for key in custom))
+        used = set(headers)
+        reserved = {_csv_cell(key) for key in [*stored_keys, *custom_keys]}
+        stored_headers = [_export_column_name(key, used, reserved) for key in stored_keys]
+        custom_headers = [_export_column_name(key, used, reserved) for key in custom_keys]
+        writer.writerow([_csv_cell(header) for header in [*headers, *stored_headers, *custom_headers]])
+        for item, custom in zip(items, fields):
+            first_name = item.get("first_name") or custom.get("first_name") or ""
+            last_name = item.get("last_name") or custom.get("last_name") or ""
+            name = item.get("full_name") or f"{first_name} {last_name}".strip() or custom.get("full_name") or ""
+            values = [
+                name, item.get("email_normalized"),
+                item.get("company_name") or custom.get("company_name") or custom.get("company") or "",
+                item.get("status"), item["answered"], item["clicked"], item["ready"], item["undelivered"],
+                *(item.get(key) for key in stored_keys),
+                *(custom.get(key) for key in custom_keys),
+            ]
+            writer.writerow([_csv_cell(value) for value in values])
+    else:
+        writer.writerow(["Email"])
+        writer.writerows([_csv_cell(item.get("email_normalized"))] for item in items)
 
+    filename = "contacts.csv" if include_data else "contact-emails.csv"
     return Response(
         content="\ufeff" + output.getvalue(),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="contacts.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
