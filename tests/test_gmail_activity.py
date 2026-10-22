@@ -72,10 +72,12 @@ class _Messages:
     def __init__(self, messages: dict[str, dict]):
         self._messages = messages
         self.list_calls = 0
+        self.list_kwargs: list[dict] = []
         self.get_calls: list[str] = []
 
     def list(self, **_kwargs):
         self.list_calls += 1
+        self.list_kwargs.append(_kwargs)
         return _Request({"messages": [{"id": message_id} for message_id in self._messages]})
 
     def get(self, *, id: str, **_kwargs):
@@ -317,8 +319,6 @@ def test_watch_and_history_use_push_cursor_instead_of_listing_mailbox(tmp_path, 
         assert sender.gmail_history_id == "100"
         assert watch_service.watch_calls[0]["body"] == {
             "topicName": "projects/test/topics/gmail-events",
-            "labelIds": ["INBOX"],
-            "labelFilterBehavior": "INCLUDE",
         }
         renewal_service = _GmailService(
             {}, watch_response={"historyId": "110", "expiration": expiration},
@@ -343,6 +343,7 @@ def test_watch_and_history_use_push_cursor_instead_of_listing_mailbox(tmp_path, 
 
         assert result["replied"] == 1
         assert history_service.history_calls[0]["startHistoryId"] == "100"
+        assert "labelId" not in history_service.history_calls[0]
         assert history_service._messages.list_calls == 0
         assert history_service._messages.get_calls == ["reply"]
         assert sender.gmail_history_id == "120"

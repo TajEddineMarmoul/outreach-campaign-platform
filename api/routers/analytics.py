@@ -89,11 +89,13 @@ def analytics(days: int = Query(default=7, ge=1, le=30), page: int = Query(defau
                 EmailTrackingEvent.event_type,
                 func.count(func.distinct(EmailTrackingEvent.send_log_id)),
             )
+            .join(SendLog, SendLog.id == EmailTrackingEvent.send_log_id)
             .where(
                 EmailTrackingEvent.user_id == user_id,
                 EmailTrackingEvent.occurred_at >= start,
                 EmailTrackingEvent.occurred_at <= now,
                 EmailTrackingEvent.event_type.in_(("opened", "clicked")),
+                SendLog.status.notin_(("bounced", "failed", "error")),
             )
             .group_by(EmailTrackingEvent.event_type)
         ).all()
@@ -101,11 +103,13 @@ def analytics(days: int = Query(default=7, ge=1, le=30), page: int = Query(defau
     engagement_event_counts = dict(
         session.execute(
             select(EmailTrackingEvent.event_type, func.count())
+            .join(SendLog, SendLog.id == EmailTrackingEvent.send_log_id)
             .where(
                 EmailTrackingEvent.user_id == user_id,
                 EmailTrackingEvent.occurred_at >= start,
                 EmailTrackingEvent.occurred_at <= now,
                 EmailTrackingEvent.event_type.in_(("opened", "clicked")),
+                SendLog.status.notin_(("bounced", "failed", "error")),
             )
             .group_by(EmailTrackingEvent.event_type)
         ).all()

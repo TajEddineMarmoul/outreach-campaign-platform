@@ -149,3 +149,40 @@ def test_public_pixel_and_redirect_endpoints_record_events(monkeypatch):
     persisted = session.get(SendLog, log.id)
     assert persisted.open_count == 1
     assert persisted.click_count == 1
+
+
+def test_failed_delivery_preserves_history_but_excludes_engagement_metrics(monkeypatch):
+    from api.routers.analytics import analytics
+    from api.routers.campaign_delivery import get_campaign_send_logs, get_campaign_send_progress
+
+    monkeypatch.setenv("TRACKING_BASE_URL", "https://track.example")
+    session = make_session()
+    log = make_log(session)
+    log.status = "sent"
+    prepare_tracked_email(session, log, '<a href="https://example.com">Open</a>')
+    session.commit()
+    link = session.scalar(select(EmailTrackingLink).where(EmailTrackingLink.send_log_id == log.id))
+    record_open(session, log.tracking_token)
+    record_click(session, link.token)
+    log.status = "bounced"
+    session.commit()
+
+    # A returned original HTML message must not add more opens/clicks after failure.
+    assert record_open(session, log.tracking_token) is True
+    assert record_click(session, link.token) == "https://example.com"
+    assert log.open_count == log.click_count == 1
+    assert len(session.scalars(select(EmailTrackingEvent)).all()) == 2
+
+    progress = get_campaign_send_progress(log.campaign_id, session=session, user_id=USER_ID)
+    assert progress["opened_count"] == progress["clicked_count"] == 0
+    report = analytics(days=7, page=1, session=session, user_id=USER_ID)
+    assert report["opened"] == report["clicked"] == 0
+    assert report["open_events"] == report["click_events"] == 0
+    for engagement in ("opened", "clicked"):
+        assert get_campaign_send_logs(log.campaign_id, engagement=engagement, session=session, user_id=USER_ID)["total"] == 0
+    entries = get_campaign_send_logs(log.campaign_id, engagement="all", session=session, user_id=USER_ID)
+    assert entries["total"] == 1
+    assert entries["items"][0]["status"] == "bounced"
+    assert entries["items"][0]["open_count"] == 1
+    failed = get_campaign_send_logs(log.campaign_id, engagement="undelivered", session=session, user_id=USER_ID)
+    assert failed["total"] == 1 and failed["items"][0]["status"] == "bounced"

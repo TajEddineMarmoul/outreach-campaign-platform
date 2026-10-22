@@ -30,9 +30,10 @@ interface LogEntry {
 }
 
 interface LogsResponse { items: LogEntry[]; total: number; page: number; page_size: number; pages: number; }
-type EngagementFilter = "all" | "opened" | "clicked" | "replied";
+type EngagementFilter = "all" | "opened" | "clicked" | "replied" | "undelivered";
 const ENGAGEMENT_FILTERS: { value: EngagementFilter; label: string }[] = [
   { value: "all", label: "All activity" },
+  { value: "undelivered", label: "Undelivered" },
   { value: "opened", label: "Opened" },
   { value: "clicked", label: "Clicked" },
   { value: "replied", label: "Replied" },
@@ -105,7 +106,13 @@ export default function LogsSection({ campaignId }: { campaignId: string }) {
     try {
       const response = await authFetch(`${API_URL}/api/campaigns/${campaignId}/sync-gmail-activity`, { method: "POST" });
       if (!response.ok) await checkResponse(response);
+      const result = await response.json();
       await Promise.all([mutate(), mutateState()]);
+      if (result.errors || result.reconnect_required) {
+        throw new Error(result.reconnect_required
+          ? "Reconnect the affected Gmail account to check delivery failures."
+          : "Gmail could not be fully checked. Try again or reconnect the affected account.");
+      }
     } catch (error) {
       setSyncError(errorMessage(error, "Could not check Gmail right now."));
     } finally {
@@ -242,6 +249,7 @@ export default function LogsSection({ campaignId }: { campaignId: string }) {
                 <td className="px-4 py-2.5 text-slate-600">
                   {log.open_count || log.click_count ? (
                     <div className="space-y-1">
+                      {log.status === "bounced" && <p className="text-amber-700">Unverified tracking; delivery failed</p>}
                       {log.open_count > 0 && <div className="flex items-center gap-1.5"><MailOpen className="h-3.5 w-3.5 text-blue-600" />{log.open_count} open{log.open_count === 1 ? "" : "s"}</div>}
                       {log.click_count > 0 && <div className="flex items-center gap-1.5"><MousePointerClick className="h-3.5 w-3.5 text-emerald-600" />{log.click_count} click{log.click_count === 1 ? "" : "s"}</div>}
                     </div>

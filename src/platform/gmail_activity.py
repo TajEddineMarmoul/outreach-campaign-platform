@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.parser import Parser
 from email.utils import getaddresses
 from html import unescape
 from typing import Any, Iterable
@@ -29,10 +30,11 @@ GMAIL_WATCH_RETRY_INTERVAL = timedelta(minutes=15)
 GMAIL_PUSH_RETRY_INTERVAL = timedelta(minutes=5)
 GMAIL_PUSH_LOCK_TIMEOUT = timedelta(minutes=10)
 BOUNCE_SEARCH_QUERY = (
-    'newer_than:45d '
-    '{subject:"Delivery Status Notification (Failure)" subject:Undeliverable '
-    'from:(mailer-daemon@googlemail.com)} '
-    '-subject:"Delivery Status Notification (Delay)"'
+    'in:anywhere -in:sent -in:drafts -in:chats '
+    '{from:mailer-daemon from:postmaster subject:undeliverable '
+    'subject:"delivery failure" subject:"delivery failed" '
+    'subject:"delivery status notification" "Address not found" '
+    '"couldn\'t be delivered" "Message not delivered"}'
 )
 RESPONSE_SEARCH_QUERY = "newer_than:45d in:anywhere -in:sent -in:drafts -in:chats"
 EMAIL_PATTERN = re.compile(r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -59,6 +61,8 @@ class BounceNotice:
     recipients: tuple[str, ...]
     reason: str
     occurred_at: datetime
+    original_message_ids: tuple[str, ...] = ()
+    gmail_thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,83 @@ def _message_text(payload: dict[str, Any]) -> str:
     return "\n".join(chunks)
 
 
+def _report_parts(payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    """Exclude the returned original email from delivery-report classification."""
+    if payload.get("mimeType", "").lower() in {"message/rfc822", "text/rfc822-headers"}:
+        return
+    yield payload
+    for part in payload.get("parts") or []:
+        if isinstance(part, dict):
+            yield from _report_parts(part)
+
+
+def _part_text(part: dict[str, Any]) -> str:
+    body = part.get("body") or {}
+    return body.get("content") or _decode_body_data(body.get("data"))
+
+
+def _report_text(payload: dict[str, Any]) -> str:
+    return unescape("\n".join(
+        _part_text(part) for part in _report_parts(payload)
+        if part.get("mimeType", "").startswith("text/")
+        or part.get("mimeType") == "message/delivery-status"
+    ))
+
+
+def _is_delivery_report(payload: dict[str, Any]) -> bool:
+    senders = getaddresses(_top_header_values(payload, "From"))
+    return bool(
+        any(address.lower().partition("@")[0] in {"mailer-daemon", "postmaster"} for _, address in senders)
+        or _top_header_values(payload, "X-Failed-Recipients")
+        or any(part.get("mimeType") == "message/delivery-status" for part in _report_parts(payload))
+    )
+
+
+def _message_identifiers(values: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        match.strip() for value in values
+        for match in re.findall(r"<([^<>\s]+@[^<>\s]+)>", value)
+    ))
+
+
+def _original_message_ids(payload: dict[str, Any]) -> tuple[str, ...]:
+    values: list[str] = []
+    for part in _walk_parts(payload):
+        values.extend(_top_header_values(part, "Original-Message-ID"))
+        if part is not payload:
+            values.extend(_top_header_values(part, "Message-ID"))
+        if part.get("mimeType") in {"text/rfc822-headers", "message/delivery-status", "message/rfc822"}:
+            values.extend(re.findall(r"(?im)^(?:Original-)?Message-ID:\s*(<[^>]+>)", _part_text(part)))
+    originals = _message_identifiers(values)
+    if originals:
+        return originals
+    reply_to = _message_identifiers(_top_header_values(payload, "In-Reply-To"))
+    if reply_to:
+        return reply_to
+    # References may include older sends in the conversation. The last entry
+    # identifies the parent; earlier entries must not redirect a bounce.
+    return _message_identifiers(_top_header_values(payload, "References"))[-1:]
+
+
+def _dsn_recipients(payload: dict[str, Any]) -> tuple[bool, tuple[str, ...]]:
+    found = False
+    failed: list[str] = []
+    for part in _report_parts(payload):
+        if part.get("mimeType") != "message/delivery-status":
+            continue
+        for block in re.split(r"\r?\n\s*\r?\n", _message_text(part)):
+            fields = Parser().parsestr(block)
+            recipient = fields.get("Final-Recipient") or fields.get("Original-Recipient")
+            if not recipient:
+                continue
+            found = True
+            action = str(fields.get("Action", "")).strip().lower()
+            status = str(fields.get("Status", "")).strip()
+            if action == "failed" or (not action and status.startswith("5.")):
+                failed.append(recipient)
+    return found, _dedupe_addresses(failed)
+
+
 def _dedupe_addresses(values: Iterable[str]) -> tuple[str, ...]:
     result: list[str] = []
     seen: set[str] = set()
@@ -151,7 +232,7 @@ def _message_time(message: dict[str, Any]) -> datetime:
 
 
 def _failed_recipients(payload: dict[str, Any], body_text: str) -> tuple[str, ...]:
-    candidates = _header_values(payload, "X-Failed-Recipients")
+    candidates = _top_header_values(payload, "X-Failed-Recipients")
     patterns = (
         r"(?:Final|Original)-Recipient:\s*(?:rfc822;)?\s*([^\s<>]+@[^\s<>]+)",
         r"wasn(?:'|’|&#39;)t delivered to\s+([^\s<>]+@[^\s<>]+)",
@@ -168,7 +249,7 @@ def _is_permanent_failure(subject: str, payload: dict[str, Any], body_text: str)
     lowered_body = body_text.lower()
     if "delivery status notification (delay)" in lowered_subject:
         return False
-    if _header_values(payload, "X-Failed-Recipients"):
+    if _top_header_values(payload, "X-Failed-Recipients"):
         return True
     if any(marker in lowered_subject for marker in ("undeliverable", "delivery failure", "delivery failed")):
         return True
@@ -190,6 +271,8 @@ def _bounce_reason(body_text: str) -> str:
         return "Recipient domain could not receive email (DNS error)."
     if "mailbox" in lowered and any(marker in lowered for marker in ("full", "quota", "over limit")):
         return "Recipient mailbox is full."
+    if any(marker in lowered for marker in ("hop count exceeded", "mail loop", "routing loop")):
+        return "Delivery failed because the recipient mail system encountered a routing loop."
     if any(marker in lowered for marker in ("blocked", "rejected", "not permitted", "policy")):
         return "Recipient mail server rejected the message."
     return "Recipient mail server returned the message as undeliverable."
@@ -198,17 +281,24 @@ def _bounce_reason(body_text: str) -> str:
 def parse_bounce_message(message: dict[str, Any]) -> BounceNotice | None:
     message_id = str(message.get("id") or "").strip()
     payload = message.get("payload") or {}
-    if not message_id or not isinstance(payload, dict):
+    if not message_id or not isinstance(payload, dict) or set(message.get("labelIds") or []) & {"SENT", "DRAFT"}:
+        return None
+    if not _is_delivery_report(payload):
         return None
     subjects = _top_header_values(payload, "Subject")
     subject = subjects[0] if subjects else ""
-    body_text = unescape("\n".join(filter(None, (_message_text(payload), str(message.get("snippet") or "")))))
-    if not _is_permanent_failure(subject, payload, body_text):
+    body_text = _report_text(payload)
+    has_dsn, recipients = _dsn_recipients(payload)
+    if not has_dsn and not _is_permanent_failure(subject, payload, body_text):
         return None
-    recipients = _failed_recipients(payload, body_text)
+    if not has_dsn:
+        recipients = _failed_recipients(payload, body_text)
     if not recipients:
         return None
-    return BounceNotice(message_id, recipients, _bounce_reason(body_text), _message_time(message))
+    return BounceNotice(
+        message_id, recipients, _bounce_reason(body_text), _message_time(message),
+        _original_message_ids(payload), str(message.get("threadId") or "") or None,
+    )
 
 
 def _is_automated_response(payload: dict[str, Any], subject: str) -> bool:
@@ -239,8 +329,7 @@ def parse_response_message(message: dict[str, Any], *, sender_email: str) -> Res
         return None
     subjects = _top_header_values(payload, "Subject")
     subject = subjects[0] if subjects else ""
-    body_text = unescape("\n".join(filter(None, (_message_text(payload), str(message.get("snippet") or "")))))
-    if _is_permanent_failure(subject, payload, body_text):
+    if _is_delivery_report(payload):
         return None
     return ResponseNotice(
         gmail_message_id=message_id,
@@ -251,12 +340,14 @@ def parse_response_message(message: dict[str, Any], *, sender_email: str) -> Res
     )
 
 
-def _gmail_message_ids(service: Any, query: str, *, max_pages: int = 5) -> list[str]:
+def _gmail_message_ids(service: Any, query: str, *, max_pages: int | None = 5) -> list[str]:
     message_ids: list[str] = []
     page_token: str | None = None
-    for _ in range(max_pages):
+    page = 0
+    while max_pages is None or page < max_pages:
+        page += 1
         response = service.users().messages().list(
-            userId="me", q=query, maxResults=100, pageToken=page_token, includeSpamTrash=False,
+            userId="me", q=query, maxResults=100, pageToken=page_token, includeSpamTrash=True,
         ).execute()
         message_ids.extend(str(item["id"]) for item in response.get("messages") or [] if item.get("id"))
         page_token = response.get("nextPageToken")
@@ -275,6 +366,7 @@ def _matching_sent_log(
 ) -> SendLog | None:
     timing_filters = (
         SendLog.sender_id == sender_id,
+        func.lower(SendLog.recipient_email) == recipient_email,
         SendLog.status.in_(("sent", "success")),
         SendLog.sent_at.is_not(None),
         SendLog.sent_at >= occurred_at - GMAIL_ACTIVITY_MATCH_LOOKBACK,
@@ -290,16 +382,66 @@ def _matching_sent_log(
     return session.scalar(
         select(SendLog).where(
             *timing_filters,
-            func.lower(SendLog.recipient_email) == recipient_email,
         ).order_by(SendLog.sent_at.desc(), SendLog.id.desc()).limit(1)
     )
 
 
+def _matching_bounce_log(
+    session: Session,
+    sender: Sender,
+    notice: BounceNotice,
+    recipient_email: str,
+    *,
+    service: Any | None,
+    message_id_cache: dict[str, tuple[str, ...]],
+) -> SendLog | None:
+    candidates = list(session.scalars(select(SendLog).where(
+        SendLog.user_id == sender.user_id,
+        SendLog.sender_id == sender.id,
+        func.lower(SendLog.recipient_email) == recipient_email,
+        SendLog.status.in_(("sent", "success", "bounced")),
+        SendLog.sent_at.is_not(None),
+        SendLog.sent_at <= notice.occurred_at + timedelta(minutes=15),
+    ).order_by(SendLog.sent_at.desc(), SendLog.id.desc())))
+    if notice.original_message_ids:
+        if service is None:
+            return None
+        matches = []
+        for log in candidates:
+            if not log.gmail_message_id:
+                continue
+            if log.gmail_message_id not in message_id_cache:
+                try:
+                    original = service.users().messages().get(
+                        userId="me", id=log.gmail_message_id, format="metadata", metadataHeaders=["Message-ID"],
+                    ).execute()
+                except HttpError as exc:
+                    if getattr(exc.resp, "status", None) == 404:
+                        continue
+                    raise
+                message_id_cache[log.gmail_message_id] = _message_identifiers(
+                    _top_header_values(original.get("payload") or {}, "Message-ID"),
+                )
+            if set(notice.original_message_ids) & set(message_id_cache[log.gmail_message_id]):
+                matches.append(log)
+        return matches[0] if len(matches) == 1 else None
+    thread_matches = [log for log in candidates if notice.gmail_thread_id and log.gmail_thread_id == notice.gmail_thread_id]
+    if thread_matches:
+        return thread_matches[0] if len(thread_matches) == 1 else None
+    # A recipient alone cannot distinguish repeat sends. Leave ambiguous reports
+    # unmatched rather than assigning a failure to the most recent campaign.
+    recent = [log for log in candidates if _aware_utc(log.sent_at) >= notice.occurred_at - GMAIL_ACTIVITY_MATCH_LOOKBACK]
+    return recent[0] if len(recent) == 1 else None
+
+
 def _event_seen(session: Session, *, sender_id: int, gmail_message_id: str) -> bool:
-    return bool(session.scalar(select(GmailActivityEvent.id).where(
+    events = list(session.scalars(select(GmailActivityEvent).where(
         GmailActivityEvent.sender_id == sender_id,
         GmailActivityEvent.gmail_message_id == gmail_message_id,
-    ).limit(1)))
+    )))
+    # An NDR can arrive before the send transaction commits. Revisit unmatched
+    # failures on recovery instead of permanently losing that correlation.
+    return bool(events) and not any(event.event_type == "bounced" and event.send_log_id is None for event in events)
 
 
 def _add_event(session: Session, event: GmailActivityEvent) -> bool:
@@ -312,14 +454,28 @@ def _add_event(session: Session, event: GmailActivityEvent) -> bool:
         return False
 
 
-def _record_bounce(session: Session, sender: Sender, notice: BounceNotice) -> tuple[int, int]:
+def _record_bounce(
+    session: Session, sender: Sender, notice: BounceNotice, *,
+    service: Any | None = None, message_id_cache: dict[str, tuple[str, ...]] | None = None,
+) -> tuple[int, int]:
     new_events = 0
     matched = 0
     for recipient_email in notice.recipients:
-        log = _matching_sent_log(
-            session, sender_id=sender.id, recipient_email=recipient_email, occurred_at=notice.occurred_at,
+        log = _matching_bounce_log(
+            session, sender, notice, recipient_email, service=service,
+            message_id_cache=message_id_cache if message_id_cache is not None else {},
         )
-        if not _add_event(session, GmailActivityEvent(
+        existing = session.scalar(select(GmailActivityEvent).where(
+            GmailActivityEvent.sender_id == sender.id,
+            GmailActivityEvent.gmail_message_id == notice.gmail_message_id,
+            GmailActivityEvent.event_type == "bounced",
+            GmailActivityEvent.recipient_email == recipient_email,
+        ))
+        if existing:
+            if existing.send_log_id is not None or log is None:
+                continue
+            existing.send_log_id = log.id
+        elif not _add_event(session, GmailActivityEvent(
             user_id=sender.user_id,
             sender_id=sender.id,
             send_log_id=log.id if log else None,
@@ -330,8 +486,11 @@ def _record_bounce(session: Session, sender: Sender, notice: BounceNotice) -> tu
             occurred_at=notice.occurred_at,
         )):
             continue
-        new_events += 1
+        else:
+            new_events += 1
         if not log:
+            continue
+        if log.status == "bounced":
             continue
         log.status = "bounced"
         log.error_message = notice.reason
@@ -340,11 +499,24 @@ def _record_bounce(session: Session, sender: Sender, notice: BounceNotice) -> tu
             campaign_recipient = session.get(
                 CampaignRecipient, {"campaign_id": log.campaign_id, "contact_id": log.recipient_id},
             )
-            if campaign_recipient and campaign_recipient.status == "sent":
+            newer_campaign_send = session.scalar(select(SendLog.id).where(
+                SendLog.user_id == sender.user_id,
+                SendLog.campaign_id == log.campaign_id,
+                SendLog.recipient_id == log.recipient_id,
+                SendLog.sent_at > log.sent_at,
+            ).limit(1))
+            if (
+                campaign_recipient and campaign_recipient.status == "sent" and not newer_campaign_send
+                and (not campaign_recipient.reset_at or _aware_utc(log.sent_at) >= _aware_utc(campaign_recipient.reset_at))
+            ):
                 campaign_recipient.status = "bounced"
         if log.recipient_id is not None:
             contact = session.get(Contact, log.recipient_id)
-            if contact and contact.status in {"approved", "sent"}:
+            newer_contact_send = session.scalar(select(SendLog.id).where(
+                SendLog.user_id == sender.user_id, SendLog.recipient_id == log.recipient_id,
+                SendLog.sent_at > log.sent_at,
+            ).limit(1))
+            if contact and contact.user_id == sender.user_id and contact.status in {"approved", "sent"} and not newer_contact_send:
                 contact.status = "bounced"
         matched += 1
     return new_events, matched
@@ -405,6 +577,9 @@ def _process_gmail_message(
     session: Session,
     sender: Sender,
     message: dict[str, Any],
+    *,
+    service: Any | None = None,
+    message_id_cache: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, int]:
     result = _empty_sync_result()
     gmail_message_id = str(message.get("id") or "").strip()
@@ -413,7 +588,7 @@ def _process_gmail_message(
     result["checked_messages"] = 1
     bounce = parse_bounce_message(message)
     if bounce:
-        new_events, matched = _record_bounce(session, sender, bounce)
+        new_events, matched = _record_bounce(session, sender, bounce, service=service, message_id_cache=message_id_cache)
         result["new_events"] += new_events
         result["undelivered"] += matched
         return result
@@ -438,27 +613,40 @@ def sync_sender_gmail_activity(
     *,
     service: Any | None = None,
 ) -> dict[str, int]:
-    """Perform a bounded one-time backfill.
+    """Recover delivery reports since this account's earliest recorded send.
 
-    This is intentionally not called by the periodic worker. It is used when
-    tracking is first enabled or when Gmail says an incremental history cursor
-    is too old to recover.
+    This runs during explicit checks, initial setup, and expired-cursor recovery.
+    Ordinary worker ticks use incremental history rather than mailbox searches.
     """
     result = _empty_sync_result()
     if not sender_tracks_gmail_activity(sender):
         return result
     gmail = service or gmail_service_for_sender(session, sender)
+    earliest_send = session.scalar(select(func.min(SendLog.sent_at)).where(
+        SendLog.user_id == sender.user_id, SendLog.sender_id == sender.id,
+    ))
+    if earliest_send is None:
+        return result
+    after = int((_aware_utc(earliest_send) - timedelta(days=1)).timestamp())
     message_ids = list(dict.fromkeys([
-        *_gmail_message_ids(gmail, BOUNCE_SEARCH_QUERY),
+        *_gmail_message_ids(gmail, f"{BOUNCE_SEARCH_QUERY} after:{after}", max_pages=None),
         *_gmail_message_ids(gmail, RESPONSE_SEARCH_QUERY),
     ]))
+    message_id_cache: dict[str, tuple[str, ...]] = {}
     for gmail_message_id in message_ids:
         if _event_seen(session, sender_id=sender.id, gmail_message_id=gmail_message_id):
             continue
-        message = gmail.users().messages().get(
-            userId="me", id=gmail_message_id, format="full",
-        ).execute()
-        _merge_sync_result(result, _process_gmail_message(session, sender, message))
+        try:
+            message = gmail.users().messages().get(
+                userId="me", id=gmail_message_id, format="full",
+            ).execute()
+        except HttpError as exc:
+            if getattr(exc.resp, "status", None) == 404:
+                continue
+            raise
+        _merge_sync_result(result, _process_gmail_message(
+            session, sender, message, service=gmail, message_id_cache=message_id_cache,
+        ))
     return result
 
 
@@ -499,8 +687,6 @@ def register_sender_gmail_watch(
         userId="me",
         body={
             "topicName": topic,
-            "labelIds": ["INBOX"],
-            "labelFilterBehavior": "INCLUDE",
         },
     ).execute()
     history_id = str(response.get("historyId") or "").strip()
@@ -529,7 +715,6 @@ def _gmail_history_message_ids(service: Any, start_history_id: str) -> tuple[lis
             userId="me",
             startHistoryId=start_history_id,
             historyTypes=["messageAdded"],
-            labelId="INBOX",
             maxResults=500,
             pageToken=page_token,
         ).execute()
@@ -567,11 +752,19 @@ def process_sender_gmail_history(
         sender.gmail_push_retry_at = None
         return result
     message_ids, latest_history_id = _gmail_history_message_ids(gmail, sender.gmail_history_id)
+    message_id_cache: dict[str, tuple[str, ...]] = {}
     for gmail_message_id in message_ids:
-        message = gmail.users().messages().get(
-            userId="me", id=gmail_message_id, format="full",
-        ).execute()
-        _merge_sync_result(result, _process_gmail_message(session, sender, message))
+        try:
+            message = gmail.users().messages().get(
+                userId="me", id=gmail_message_id, format="full",
+            ).execute()
+        except HttpError as exc:
+            if getattr(exc.resp, "status", None) == 404:
+                continue  # A message can be deleted between notification and read.
+            raise
+        _merge_sync_result(result, _process_gmail_message(
+            session, sender, message, service=gmail, message_id_cache=message_id_cache,
+        ))
     sender.gmail_history_id = latest_history_id
     sender.gmail_tracking_status = "active"
     sender.gmail_sync_checked_at = _aware_utc(now or utcnow())
@@ -736,16 +929,14 @@ def process_pending_gmail_notifications(
                 if _is_expired_history_error(exc):
                     try:
                         gmail = gmail_service_for_sender(session, failed_sender)
-                        sender_result = sync_sender_gmail_activity(session, failed_sender, service=gmail)
                         register_sender_gmail_watch(
                             session, failed_sender, service=gmail, now=current, reset_cursor=True,
                         )
+                        sender_result = sync_sender_gmail_activity(session, failed_sender, service=gmail)
                         failed_sender.gmail_backfill_completed_at = current
-                        failed_sender.gmail_push_pending = 0
-                        failed_sender.gmail_pending_history_id = None
-                        failed_sender.gmail_push_locked_at = None
-                        failed_sender.gmail_push_retry_at = None
-                        failed_sender.gmail_sync_checked_at = current
+                        _merge_sync_result(sender_result, process_sender_gmail_history(
+                            session, failed_sender, service=gmail, now=current,
+                        ))
                         session.commit()
                         result["checked_senders"] += 1
                         for key in ("new_events", "undelivered", "replied", "automated_responses"):
@@ -796,19 +987,20 @@ def sync_selected_gmail_activity(
             continue
         try:
             gmail = gmail_service_for_sender(session, sender)
-            if (
-                sender.gmail_tracking_status != "active"
-                or not sender.gmail_history_id
-                or not sender.gmail_watch_expiration_at
-                or _aware_utc(sender.gmail_watch_expiration_at) <= current
-            ):
-                register_sender_gmail_watch(session, sender, service=gmail, now=current)
-            sender_result = _empty_sync_result()
-            if not sender.gmail_backfill_completed_at:
-                sender_result = sync_sender_gmail_activity(session, sender, service=gmail)
-                sender.gmail_backfill_completed_at = current
-            elif sender.gmail_push_pending:
+            # Renew here even for an active connection so existing Inbox-only
+            # watches are upgraded immediately when the user checks Gmail.
+            register_sender_gmail_watch(session, sender, service=gmail, now=current)
+            try:
                 sender_result = process_sender_gmail_history(session, sender, service=gmail, now=current)
+            except HttpError as exc:
+                if not _is_expired_history_error(exc):
+                    raise
+                register_sender_gmail_watch(session, sender, service=gmail, now=current, reset_cursor=True)
+                sender_result = _empty_sync_result()
+            # A manual check must recover archived/older failures even when no
+            # push is pending and a previous setup backfill was completed.
+            _merge_sync_result(sender_result, sync_sender_gmail_activity(session, sender, service=gmail))
+            sender.gmail_backfill_completed_at = current
             sender.gmail_sync_checked_at = current
             sender.gmail_sync_error = None
             session.commit()

@@ -55,7 +55,7 @@ def _activity_predicates(campaign_id: int | None) -> dict[str, tuple[str, list]]
 
     clicked = (
         "EXISTS (SELECT 1 FROM send_log sl WHERE "
-        f"{log_scope} AND sl.click_count > 0)"
+        f"{log_scope} AND sl.click_count > 0 AND sl.status NOT IN ('bounced', 'failed', 'error'))"
     )
     clicked_params = [*log_params]
     answered_params = [*log_params]

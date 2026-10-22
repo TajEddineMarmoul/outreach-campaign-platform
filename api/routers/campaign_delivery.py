@@ -1119,10 +1119,12 @@ def get_campaign_send_progress(
                 EmailTrackingEvent.event_type,
                 func.count(func.distinct(EmailTrackingEvent.send_log_id)),
             )
+            .join(SendLog, SendLog.id == EmailTrackingEvent.send_log_id)
             .where(
                 EmailTrackingEvent.user_id == user_id,
                 EmailTrackingEvent.campaign_id == campaign_id,
                 EmailTrackingEvent.event_type.in_(("opened", "clicked")),
+                SendLog.status.notin_(("bounced", "failed", "error")),
             )
             .group_by(EmailTrackingEvent.event_type)
         ).all()
@@ -1308,7 +1310,7 @@ def get_campaign_send_logs(
     page: int = 1,
     page_size: int = 10,
     engagement: Literal[
-        "all", "opened", "clicked", "replied"
+        "all", "opened", "clicked", "replied", "undelivered"
     ] = "all",
     session: Session = Depends(get_session),
     user_id: str = Depends(get_current_user_id),
@@ -1318,11 +1320,13 @@ def get_campaign_send_logs(
     page_size = min(max(page_size, 1), 50)
     filters = [SendLog.campaign_id == campaign_id, SendLog.user_id == user_id]
     if engagement == "opened":
-        filters.append(SendLog.open_count > 0)
+        filters.extend((SendLog.open_count > 0, SendLog.status.notin_(("bounced", "failed", "error"))))
     elif engagement == "clicked":
-        filters.append(SendLog.click_count > 0)
+        filters.extend((SendLog.click_count > 0, SendLog.status.notin_(("bounced", "failed", "error"))))
     elif engagement == "replied":
         filters.append(SendLog.response_status.in_(("replied", "automated_response")))
+    elif engagement == "undelivered":
+        filters.append(SendLog.status == "bounced")
     total = session.scalar(
         select(func.count()).select_from(SendLog)
         .where(*filters)

@@ -100,6 +100,17 @@ def test_contact_filters_support_multiple_statuses_and_campaign_scope(monkeypatc
     conn.close()
 
 
+def test_failed_send_tracking_does_not_put_contacts_in_clicked_filter(monkeypatch):
+    conn = _connection()
+    conn.execute("UPDATE send_log SET click_count = 4 WHERE status = 'bounced'")
+    monkeypatch.setattr(contacts.db, "get_campaign", lambda *_: {"id": 1})
+    result = contacts.contact_library(
+        search="", campaign_id=1, statuses=["clicked"], page=1, page_size=10, conn=conn, user_id="owner",
+    )
+    assert [item["id"] for item in result["items"]] == [2]
+    conn.close()
+
+
 def test_contact_csv_export_contains_all_matches_and_activity_flags(monkeypatch):
     conn = _connection()
     monkeypatch.setattr(contacts.db, "get_campaign", lambda _conn, campaign_id, user_id: {"id": campaign_id} if (campaign_id, user_id) == (1, "owner") else None)

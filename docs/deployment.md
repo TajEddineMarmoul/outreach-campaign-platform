@@ -96,6 +96,27 @@ The worker renews due watches and processes queued notifications. Sender read
 permission and a working push subscription are required for ongoing response
 updates. These variables alone do not create the topic or subscription.
 
+### Delivery-failure recovery
+
+Gmail watches and history reads cover the entire mailbox, including archived
+messages and custom labels. Delivery reports are classified per recipient;
+temporary retry notices and returned copies of the original email are excluded.
+Original Message-ID, sender account and recipient identify the failed send.
+Ambiguous reports are retained without marking an unrelated send as failed.
+
+After deploying the archived-bounce fix, open a campaign's activity and select
+**Check Gmail** for each connected sender group used for outreach. The authenticated
+`POST /api/campaigns/{campaign_id}/sync-gmail-activity` endpoint runs the same action.
+It immediately renews the group accounts' whole-mailbox watches and rescans
+delivery reports back to each account's earliest recorded send, even when a prior
+backfill was completed and no push is pending. Repeated checks are idempotent.
+Removed accounts require reconnection before their mailbox can be inspected.
+
+Verify the returned `errors` and `reconnect_required` counts, known failed send
+logs, and recent scheduler results. No database migration or sending test is
+needed. Tracking records are preserved, but failed sends are excluded from
+engagement totals and filters; failure takes priority in recent activity.
+
 ## Database upgrades
 
 Run Alembic with the intended deployment environment and database, using a backup

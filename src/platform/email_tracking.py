@@ -139,6 +139,8 @@ def record_open(session: Session, token: str) -> bool:
     )
     if not log:
         return False
+    if log.status in {"bounced", "failed", "error"}:
+        return True
     _record_event(session, log, event_type="opened", occurred_at=utcnow())
     session.commit()
     return True
@@ -151,6 +153,8 @@ def record_click(session: Session, token: str) -> str | None:
     log = session.scalar(select(SendLog).where(SendLog.id == link.send_log_id).with_for_update())
     if not log:
         return None
+    if log.status in {"bounced", "failed", "error"}:
+        return link.destination_url
     _record_event(
         session,
         log,

@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { formatViewerWindow } from "@/lib/timezones";
 import { API_URL } from "@/lib/api";
+import { deliveryActivity } from "@/lib/deliveryActivity";
 import DeliveryOutcomeBar, {
   deliveryOutcomeSummary,
   deliveryProgressLabel,
@@ -438,6 +439,7 @@ export default function CampaignOverview({
           </section>
           <section>
             <h2>Engagement</h2>
+            <p className="text-xs text-slate-500">Tracking does not confirm delivery. Failed sends are excluded.</p>
             <dl className="campaign-stats is-responses">
               {engagementStats.map((stat) => (
                 <div key={stat.label}>
@@ -534,51 +536,40 @@ export default function CampaignOverview({
             View all <ArrowRight size={16} />
           </button>
         </div>
-        {logs?.items.map((log) => (
+        {logs?.items.map((log) => {
+          const activity = deliveryActivity(log);
+          return (
           <div key={log.id} className="campaign-activity-row">
-            {log.response_status === "replied" ? (
-              <MessageSquareReply className="is-blue" />
-            ) : log.response_status === "automated_response" ? (
-              <Bot />
-            ) : log.click_count ? (
-              <MousePointerClick className="is-green" />
-            ) : log.open_count ? (
-              <MailOpen className="is-blue" />
-            ) : log.status === "bounced" ? (
+            {activity.kind === "bounced" ? (
               <MailX className="is-orange" />
-            ) : log.status === "failed" ? (
+            ) : activity.kind === "failed" ? (
               <AlertCircle className="is-red" />
+            ) : activity.kind === "replied" ? (
+              <MessageSquareReply className="is-blue" />
+            ) : activity.kind === "automated_response" ? (
+              <Bot />
+            ) : activity.kind === "clicked" ? (
+              <MousePointerClick className="is-green" />
+            ) : activity.kind === "opened" ? (
+              <MailOpen className="is-blue" />
             ) : (
               <Mail className="is-blue" />
             )}
             <span>
-              {log.response_status === "replied"
-                ? "Reply received from"
-                : log.response_status === "automated_response"
-                  ? "Automated reply from"
-                  : log.click_count
-                    ? "Link clicked by"
-                    : log.open_count
-                      ? "Email opened by"
-                  : log.status === "bounced"
-                    ? "Email was undelivered to"
-                    : log.status === "failed"
-                      ? "Send error for"
-                : log.status === "test_sent"
-                  ? "Test recorded for"
-                  : "Email sent to"}{" "}
+              {activity.label}{" "}
               {log.recipient_email}
             </span>
-            <time dateTime={log.responded_at || log.bounced_at || log.last_clicked_at || log.last_opened_at || log.sent_at || log.created_at || undefined}>
-              {log.responded_at || log.bounced_at || log.last_clicked_at || log.last_opened_at || log.sent_at || log.created_at
-                ? new Date(log.responded_at || log.bounced_at || log.last_clicked_at || log.last_opened_at || log.sent_at || log.created_at!).toLocaleTimeString(
+            <time dateTime={activity.at || undefined}>
+              {activity.at
+                ? new Date(activity.at).toLocaleTimeString(
                     undefined,
                     { hour: "numeric", minute: "2-digit" },
                   )
                 : "—"}
             </time>
           </div>
-        ))}
+          );
+        })}
         {!logs?.items.length && (
           <p className="campaign-table-empty">
             {logsError
