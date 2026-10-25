@@ -68,13 +68,30 @@ def render_template(template: str, context: dict[str, Any], *, strict: bool = Fa
     return TEMPLATE_VARIABLE_PATTERN.sub(replace_variable, template or "").strip()
 
 
-def render_email(contact: sqlite3.Row | dict[str, Any], campaign: sqlite3.Row | dict[str, Any]) -> RenderedEmail:
+def render_email(
+    contact: sqlite3.Row | dict[str, Any],
+    campaign: sqlite3.Row | dict[str, Any],
+    *,
+    strict: bool = False,
+) -> RenderedEmail:
     contact_dict = row_to_dict(contact)
     campaign_dict = row_to_dict(campaign)
     context = contact_context(contact_dict)
+    subject = str(campaign_dict.get("subject_template") or "")
+    body = str(
+        campaign_dict.get("body_template") or campaign_dict.get("fallback_body_template") or ""
+    )
+    missing = list(
+        dict.fromkeys(
+            missing_template_variables(subject, context) + missing_template_variables(body, context)
+        )
+    )
+    if strict and missing:
+        raise MissingTemplateVariablesError(missing)
     return RenderedEmail(
         recipient_email=str(contact_dict.get("email") or contact_dict.get("email_normalized") or ""),
-        subject=render_template(str(campaign_dict["subject_template"]), context),
-        body=render_template(str(campaign_dict["body_template"]), context),
+        subject=render_template(subject, context),
+        body=render_template(body, context),
         used_fallback=False,
+        missing_variables=missing,
     )

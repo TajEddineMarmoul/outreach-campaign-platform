@@ -18,6 +18,7 @@ import {
 import {
   DAYS,
   clockLabel,
+  scheduleWindowReference,
   type ScheduleDraft,
   type DayWindow,
 } from "./scheduleDraft";
@@ -53,7 +54,7 @@ export default function CampaignSchedule({
     draft.timezone,
   ).slice(0, 10);
   const usesStartDate = draft.mode === "schedule" || (draft.mode === "autopilot" && dateChosen);
-  const conversionWallTime = usesStartDate ? draft.scheduledAt : `${today}T${first.start}`;
+  const conversionWallTime = scheduleWindowReference(draft);
   const conversion = formatViewerConversion(
     conversionWallTime,
     draft.timezone,
@@ -118,7 +119,7 @@ export default function CampaignSchedule({
             />
             {conversionWallTime && conversion && viewerZone !== draft.timezone && (
               <p className="campaign-time-conversion">
-                {clockLabel(conversionWallTime.slice(11))} in {zoneCity} is{" "}
+                Time reference: {clockLabel(conversionWallTime.slice(11))} in {zoneCity} is{" "}
                 {conversion} in {viewerCity}.
               </p>
             )}
@@ -168,7 +169,7 @@ export default function CampaignSchedule({
 
           {autopilot ? (
             <>
-              <fieldset className="campaign-field campaign-days-field">
+              <fieldset className="campaign-field campaign-days-field" aria-describedby="campaign-days-timezone">
                 <legend>Sending days</legend>
                 <div className="campaign-day-picker">
                   {DAYS.map((day) => (
@@ -193,8 +194,11 @@ export default function CampaignSchedule({
                     </button>
                   ))}
                 </div>
+                <p id="campaign-days-timezone" className="campaign-field-hint">
+                  All sending days and hours use {zoneCity} ({draft.timezone}).
+                </p>
               </fieldset>
-              {!perDay && !customized && (
+              {!perDay && (
                 <>
                   <fieldset className="campaign-field campaign-window-field">
                     <legend>Send between</legend>
@@ -236,7 +240,7 @@ export default function CampaignSchedule({
                   </div>
                 </>
               )}
-              {(perDay || customized) && (
+              {perDay && (
                 <div className="campaign-day-settings">
                   <p>Custom limits and windows</p>
                   {activeDays.map((day) => (
@@ -310,15 +314,20 @@ export default function CampaignSchedule({
                   <label className="campaign-check-field">
                     <input
                       type="checkbox"
-                      checked={perDay || customized}
-                      disabled={customized}
-                      onChange={(event) => setPerDay(event.target.checked)}
+                      checked={perDay}
+                      onChange={(event) => {
+                        const enabled = event.target.checked;
+                        if (!enabled) {
+                          updateAllDays({ cap: first.cap, start: first.start, end: first.end });
+                        }
+                        setPerDay(enabled);
+                      }}
                     />
                     Customize each sending day
                   </label>
-                  {customized && (
+                  {perDay && (
                     <p className="campaign-field-hint">
-                      Your saved per-day windows and limits are preserved above.
+                      Turn this off to use {activeDays[0] || "monday"}’s window and limit for all sending days.
                     </p>
                   )}
                   <div className="campaign-field">

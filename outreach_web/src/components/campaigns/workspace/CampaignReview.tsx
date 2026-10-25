@@ -36,6 +36,7 @@ export default function CampaignReview({
   messageReady,
   scheduleError,
   ready,
+  isPaused = false,
   onEdit,
   onTest,
   testLoading,
@@ -57,6 +58,7 @@ export default function CampaignReview({
   messageReady: boolean;
   scheduleError: string;
   ready: boolean;
+  isPaused?: boolean;
   onEdit: (step: CampaignStep) => void;
   onTest: () => void;
   testLoading: boolean;
@@ -92,7 +94,11 @@ export default function CampaignReview({
       step: "schedule" as const,
       icon: Clock3,
       title: "Schedule",
-      text: draft && configured ? scheduleLabel(draft) : "Not set yet",
+      text: draft && configured
+        ? isPaused && draft.mode === "send_now"
+          ? `On resume · ${draft.timezone}`
+          : scheduleLabel(draft)
+        : "Not set yet",
     },
   ];
   const checks = [
@@ -135,7 +141,7 @@ export default function CampaignReview({
     <div className="campaign-minimal-review">
       <div role="status" className={`campaign-ready-banner ${ready ? "is-ready" : "needs-attention"}`}>
         {loading ? <Loader2 className="animate-spin" /> : ready ? <CircleCheck /> : <AlertCircle />}
-        <span>{loading ? "Checking your campaign…" : ready ? draft?.dryRun ? "Ready for a test run" : "Ready to launch" : "A few details need your attention"}</span>
+        <span>{loading ? "Checking your campaign…" : ready ? isPaused ? draft?.dryRun ? "Ready to resume the test run" : "Ready to resume" : draft?.dryRun ? "Ready for a test run" : "Ready to launch" : "A few details need your attention"}</span>
       </div>
       <section className="campaign-review-summary" aria-label="Campaign summary">
         {rows.map((row) => (
@@ -206,7 +212,7 @@ export default function CampaignReview({
           {testLoading ? "Opening preview…" : "Preview & test"}
         </button>
       </div>
-      <p className="campaign-launch-note"><ShieldCheck size={17} /> {draft?.dryRun ? "Test mode is on. No real emails will be sent." : "Nothing sends until you launch this campaign."}</p>
+      <p className="campaign-launch-note"><ShieldCheck size={17} /> {draft?.dryRun ? "Test mode is on. No real emails will be sent." : isPaused ? "Sending stays paused until you resume this campaign." : "Nothing sends until you launch this campaign."}</p>
       {trackingEnabled && <p className="campaign-tracking-note"><MousePointerClick size={15} /> Opens can be affected by image blocking or privacy tools; clicks are the stronger engagement signal.</p>}
     </div>
   );

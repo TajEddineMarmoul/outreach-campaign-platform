@@ -24,6 +24,7 @@ import DeliveryOutcomeBar, {
   deliveryProgressLabel,
   getDeliveryProgress,
 } from "@/components/campaigns/DeliveryOutcomeBar";
+import DailyCapacityMeter, { type DailyCapacity } from "@/components/campaigns/DailyCapacityMeter";
 
 interface Campaign {
   id: number;
@@ -54,7 +55,11 @@ function CampaignsContent() {
     error,
     isLoading,
     mutate,
-  } = useSWR<Campaign[]>(`${API_URL}/api/campaigns`);
+  } = useSWR<Campaign[]>(`${API_URL}/api/campaigns`, { refreshInterval: 30000 });
+  const { data: dailyCapacity, error: capacityError, mutate: refreshCapacity } = useSWR<{ items: DailyCapacity[] }>(
+    `${API_URL}/api/campaigns/daily-capacity`, { refreshInterval: 30000 },
+  );
+  const capacityByCampaign = new Map(dailyCapacity?.items.map((item) => [item.campaign_id, item]));
   const router = useRouter();
   const searchParams = useSearchParams();
   const [search, setSearch] = useState("");
@@ -140,6 +145,7 @@ function CampaignsContent() {
       );
       await mutate();
       setPendingAction(null);
+      void refreshCapacity();
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
@@ -221,6 +227,7 @@ function CampaignsContent() {
                 <th scope="col">Campaign</th>
                 <th scope="col">Status</th>
                 <th scope="col">Delivery</th>
+                <th scope="col" title="Sent today / estimated total today / daily limit">Today</th>
                 <th scope="col">Updated</th>
                 <th scope="col">
                   <span className="sr-only">Actions</span>
@@ -265,6 +272,9 @@ function CampaignsContent() {
                         ) : (
                           <span className="app-muted">No recipients yet</span>
                         )}
+                      </td>
+                      <td>
+                        <DailyCapacityMeter capacity={capacityByCampaign.get(item.id)} error={Boolean(capacityError)} />
                       </td>
                       <td className="app-muted">{formatDate(item.updated_at)}</td>
                       <td>

@@ -1,4 +1,5 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
@@ -7,13 +8,17 @@ from sqlalchemy.orm import Session
 
 from api.routers.campaign_workspace import duplicate_campaign
 from api.routers.campaign_delivery import (
+    SendSettingsUpdate,
     clear_campaign_recipients,
     get_campaign_recipients,
+    get_recipient_template_validation,
+    patch_send_settings,
+    post_resume,
     require_campaign_editable,
     require_campaign_ready_to_start,
 )
-from src.platform.models import Base, Campaign, CampaignAttachment, CampaignRecipient, Contact, SendJob, SendLog, Sender, SenderGroup, AutopilotDaySchedule
-from src.platform.services import ensure_user
+from src.platform.models import Base, Campaign, CampaignAttachment, CampaignRecipient, Contact, SendJob, SendLog, Sender, SenderGroup, AutopilotDaySchedule, UserSettings
+from src.platform.services import autopilot_window_state, ensure_user, next_autopilot_run
 from src.platform.time import utcnow
 
 
@@ -27,6 +32,34 @@ def session(tmp_path):
         ensure_user(session, "workspace-user")
         yield session
     engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "instant,day,allowed",
+    [
+        ("2026-10-25T20:30:00+00:00", "monday", True),  # Monday in Dubai, Sunday in Casablanca.
+        ("2026-10-26T22:30:00+00:00", "tuesday", False),  # Tuesday in Dubai, Monday in Casablanca.
+    ],
+)
+def test_sending_weekday_follows_campaign_timezone_at_midnight(session, instant, day, allowed):
+    session.get(UserSettings, "workspace-user").timezone = "Africa/Casablanca"
+    campaign = Campaign(user_id="workspace-user", name="Dubai weekdays", timezone="Asia/Dubai", status="autopilot",
+                        send_settings={"mode": "autopilot"})
+    session.add(campaign)
+    session.flush()
+    session.add(AutopilotDaySchedule(campaign_id=campaign.id, day_of_week="monday", daily_cap=10,
+                                   start_time="00:00", end_time="23:59"))
+    session.commit()
+    now = datetime.fromisoformat(instant)
+    assert now.astimezone(ZoneInfo("Africa/Casablanca")).date() != now.astimezone(ZoneInfo("Asia/Dubai")).date()
+    assert now.astimezone(ZoneInfo("Asia/Dubai")).strftime("%A").lower() == day
+    state = autopilot_window_state(session, campaign, now=now)
+    assert state["allowed"] is allowed
+    if allowed:
+        assert state["schedule"].day_of_week == "monday"
+    else:
+        assert state["reason_code"] == "autopilot_day_disabled"
+        assert next_autopilot_run(session, campaign, now=now).astimezone(ZoneInfo("Asia/Dubai")).strftime("%A") == "Monday"
 
 
 def test_duplicate_is_an_independent_draft_without_delivery_work(session):
@@ -160,6 +193,88 @@ def test_paused_campaign_can_be_edited_without_resuming(session):
             CampaignRecipient.campaign_id == campaign.id,
         ),
     ) == 0
+
+
+def test_paused_review_checks_queued_and_retryable_recipients_without_changing_delivery(session):
+    campaign = Campaign(user_id="workspace-user", name="Paused review", status="paused",
+                        subject_template="Hi {{first_name}}", body_template="Hello")
+    group = SenderGroup(user_id="workspace-user", name="Resume tests")
+    session.add_all([campaign, group])
+    session.flush()
+    sender = Sender(user_id="workspace-user", group_id=group.id, email="sender@example.test")
+    session.add(sender)
+    session.flush()
+    cases = [
+        ("approved", None, {"first_name": "New"}),
+        ("queued", "queued", {"first_name": "Queued"}),
+        ("queued", "retry", {}),
+        ("failed", "failed", {"first_name": "Retry"}),
+        ("sent", "sent", {}),
+        ("queued", "running", {}),
+        ("rejected", None, {}),
+    ]
+    for index, (status, job_status, fields) in enumerate(cases):
+        contact = Contact(user_id="workspace-user", email_normalized=f"review{index}@example.test",
+                          status="approved", custom_fields=fields)
+        session.add(contact)
+        session.flush()
+        session.add(CampaignRecipient(campaign_id=campaign.id, contact_id=contact.id, status=status))
+        if job_status:
+            session.add(SendJob(user_id="workspace-user", campaign_id=campaign.id, recipient_id=contact.id,
+                                sender_id=sender.id, status=job_status, batch_id=f"review-{index}",
+                                idempotency_key=f"review-{index}"))
+    session.commit()
+
+    result = get_recipient_template_validation(campaign.id, session, "workspace-user")
+
+    assert result == {
+        "checked_recipient_count": 4,
+        "ready_recipient_count": 3,
+        "skipped_recipient_count": 1,
+        "overlap_recipient_count": 0,
+        "missing_by_variable": [{"variable": "first_name", "row_count": 1}],
+    }
+    assert campaign.status == "paused"
+    assert list(session.scalars(select(CampaignRecipient.status).order_by(CampaignRecipient.contact_id))) == [case[0] for case in cases]
+    assert session.scalar(select(func.count()).select_from(SendJob)) == 5
+
+    campaign.status = "draft"
+    session.commit()
+    assert get_recipient_template_validation(campaign.id, session, "workspace-user")["checked_recipient_count"] == 1
+
+
+def test_paused_edit_then_resume_preserves_queued_jobs_and_sent_recipients(session, monkeypatch):
+    from api.routers import campaign_delivery
+
+    monkeypatch.setattr(campaign_delivery, "require_delivery_enabled", lambda: None)
+    campaign, _ = _audience_with_delivery(session, status="paused")
+    job = session.scalar(select(SendJob).where(SendJob.campaign_id == campaign.id))
+    session.get(CampaignRecipient, (campaign.id, job.recipient_id)).status = "queued"
+    sent_recipient = session.scalar(select(CampaignRecipient).where(
+        CampaignRecipient.campaign_id == campaign.id,
+        CampaignRecipient.contact_id != job.recipient_id,
+    ))
+    sent_recipient.status = "sent"
+    campaign.subject_template = "Updated subject"
+    campaign.body_template = "Updated body"
+    session.commit()
+    job_id = job.id
+
+    patch_send_settings(campaign.id, SendSettingsUpdate(
+        mode="autopilot", timezone="Asia/Dubai", dry_run=True, pacing_mode="spread_evenly",
+        schedule={"sunday": {"cap": 10, "start": "09:00", "end": "16:30"}},
+    ), session, "workspace-user")
+    assert campaign.status == "paused"
+    result = post_resume(campaign.id, session, "workspace-user")
+
+    assert result["status"] == "autopilot"
+    assert result["queued"] == 1
+    assert campaign.subject_template == "Updated subject" and campaign.body_template == "Updated body"
+    assert campaign.timezone == "Asia/Dubai"
+    assert campaign.send_settings["pacing_mode"] == "spread_evenly"
+    assert session.get(SendJob, job_id).status == "queued"
+    assert session.scalar(select(func.count()).select_from(SendJob).where(SendJob.campaign_id == campaign.id)) == 1
+    assert sent_recipient.status == "sent"
 
 
 def test_clear_audience_waits_for_inflight_email_even_after_campaign_ends(session):

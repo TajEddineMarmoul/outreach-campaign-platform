@@ -69,6 +69,8 @@ import { trackEvent } from "@/lib/analytics";
 import {
   extractTemplateVariables,
   templateVariableName,
+  templateValueWarnings,
+  type TemplateValidationSummary,
 } from "@/lib/templateVariables";
 
 import CampaignHeader from "@/components/campaigns/workspace/CampaignHeader";
@@ -162,7 +164,7 @@ function CampaignEditor() {
     campaignId ? `${API_URL}/api/campaigns/${campaignId}/send-progress` : null,
   );
 
-  const { data: valSummary, mutate: mutateValSummary } = useSWR(
+  const { data: valSummary, error: valSummaryError, mutate: mutateValSummary } = useSWR<TemplateValidationSummary>(
     campaignId
       ? `${API_URL}/api/campaigns/${campaignId}/validation-summary`
       : null,
@@ -281,6 +283,11 @@ function CampaignEditor() {
       ),
     ].sort();
   }, [activeVariables, body, subject]);
+
+  const missingValueWarnings = useMemo(
+    () => templateValueWarnings([subject, body], valSummary),
+    [subject, body, valSummary],
+  );
 
   // Hydrate once per campaign. Later SWR refreshes must not replace active edits.
   useEffect(() => {
@@ -633,6 +640,7 @@ function CampaignEditor() {
     setBusyAction(action);
     setNotice("");
     try {
+      if (action === "resume") await saveCampaignChanges();
       const res = await authFetch(
         `${API_URL}/api/campaigns/${campaignId}/${action}`,
         { method: "POST" },
@@ -648,7 +656,17 @@ function CampaignEditor() {
         router.push(`/campaigns/${result.id}?step=message`);
         return;
       }
-      await refreshCampaign();
+      // Keep an accepted resume visible even if refreshing the overview fails.
+      if (action === "resume") {
+        await mutate(`${API_URL}/api/campaigns/${campaignId}`, {
+          ...campaign,
+          status: result.status,
+        }, { revalidate: false });
+        router.push(`/campaigns/${campaignId}?tab=overview`);
+        void refreshCampaign().catch(() => undefined);
+      } else {
+        await refreshCampaign();
+      }
       setEndDialogOpen(false);
     } catch (error) {
       setNotice(
@@ -658,31 +676,28 @@ function CampaignEditor() {
       setBusyAction(null);
     }
   };
+  const saveCampaignChanges = async (forceSchedule = false) => {
+    await flushComposerDraft();
+    await schedule.flush(forceSchedule);
+    const nextName = name.trim();
+    if (!nextName) throw new Error("Give your campaign a name before continuing.");
+    if (nextName !== campaign?.name) {
+      const response = await authFetch(`${API_URL}/api/campaigns/${campaignId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nextName }),
+      });
+      if (!response.ok)
+        throw new Error("Could not save the campaign name. Please retry saving.");
+    }
+  };
   const navigateSafely = async (href: string) => {
     if (launchingRef.current) return;
     setIsSaving(true);
     setNotice("");
     try {
       if (!editingLocked) {
-        await flushComposerDraft();
-        await schedule.flush(activeStep === "schedule");
-        const nextName = name.trim();
-        if (!nextName)
-          throw new Error("Give your campaign a name before leaving.");
-        if (nextName !== campaign?.name) {
-          const response = await authFetch(
-            `${API_URL}/api/campaigns/${campaignId}`,
-            {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name: nextName }),
-            },
-          );
-          if (!response.ok)
-            throw new Error(
-              "Could not save the campaign name. Please try again.",
-            );
-        }
+        await saveCampaignChanges(activeStep === "schedule");
       }
       router.push(href);
     } catch (error) {
@@ -814,7 +829,7 @@ function CampaignEditor() {
   const dismissTip = (step: GuideStep) => {
     if (userId) dismissCampaignTip(userId, step);
   };
-  const guideFor = (step: GuideStep) => !isOperational && campaignTips.includes(step) && activeStep === step
+  const guideFor = (step: GuideStep) => !isOperational && !isPaused && campaignTips.includes(step) && activeStep === step
     ? <CampaignGuide step={step} onDismiss={() => dismissTip(step)} onHideTips={hideTips} />
     : null;
   const changeTab = (value: string) => {
@@ -847,27 +862,11 @@ function CampaignEditor() {
   const launchCampaign = async () => {
     if (launchingRef.current || !launchReady || !schedule.draft) return;
     launchingRef.current = true;
-    setBusyAction("launch");
+    setBusyAction(isPaused ? "resume" : "launch");
     setNotice("");
+    const action = isPaused ? "resume" : "launch";
     try {
-      await flushComposerDraft();
-      await schedule.flush(true);
-      if (!name.trim())
-        throw new Error("Give your campaign a name before launching.");
-      if (name.trim() !== campaign?.name) {
-        const nameResponse = await authFetch(
-          `${API_URL}/api/campaigns/${campaignId}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: name.trim() }),
-          },
-        );
-        if (!nameResponse.ok)
-          throw new Error(
-            "Could not save the campaign name. Please retry before launching.",
-          );
-      }
+      await saveCampaignChanges(true);
       const problem = scheduleProblem(schedule.draft);
       if (problem) throw new Error(problem);
       const validationResponse = await authFetch(
@@ -875,14 +874,14 @@ function CampaignEditor() {
       );
       if (!validationResponse.ok)
         throw new Error(
-          "Could not verify recipients. Please retry before launching.",
+          `Could not verify recipients. Please retry before you ${action}.`,
         );
       const validation: RecipientValidation = await validationResponse.json();
       if (!validation.ready_recipient_count)
         throw new Error(
-          "No recipients are ready. Review your audience before launching.",
+          `No recipients are ready. Review your audience before you ${action}.`,
         );
-      const request = launchRequest(schedule.draft);
+      const request = launchRequest(schedule.draft, campaign.status);
       const response = await authFetch(
         `${API_URL}/api/campaigns/${campaignId}/${request.endpoint}`,
         {
@@ -891,14 +890,15 @@ function CampaignEditor() {
           body: JSON.stringify(request.body),
         },
       );
+      const result = await response.json().catch(() => ({}));
       if (!response.ok)
         throw new Error(
           responseProblem(
-            await response.json().catch(() => ({})),
-            "The campaign could not launch. Please try again.",
+            result,
+            `The campaign could not ${action}. Please try again.`,
           ),
         );
-      if (!schedule.draft.dryRun) {
+      if (!isPaused && !schedule.draft.dryRun) {
         trackEvent("campaign_launched", {
           delivery_mode: schedule.draft.mode,
         });
@@ -908,12 +908,12 @@ function CampaignEditor() {
         `${API_URL}/api/campaigns/${campaignId}`,
         {
           ...campaign,
-          status:
+          status: result.status || (
             schedule.draft.mode === "autopilot"
               ? "autopilot"
               : schedule.draft.mode === "schedule"
                 ? "scheduled"
-                : "sending",
+                : "sending"),
         },
         { revalidate: false },
       );
@@ -926,7 +926,7 @@ function CampaignEditor() {
       setNotice(
         error instanceof Error
           ? error.message
-          : "The campaign could not launch.",
+          : `The campaign could not ${action}.`,
       );
     } finally {
       launchingRef.current = false;
@@ -1053,6 +1053,26 @@ function CampaignEditor() {
           {!previewModalOpen && !messageToolsOpen && !variablesOpen && !attachmentModalOpen && !templateModalOpen && guideFor("message")}
         </div>
       </div>
+      {missingValueWarnings.length > 0 && (
+        <div className="campaign-notice is-error" role="alert">
+          <strong>Missing personalization data</strong>
+          <ul>
+            {missingValueWarnings.map(({ column, empty_count }) => (
+              <li key={column}>
+                {`{{${column}}}`} is missing for {empty_count} of {valSummary?.total_contacts} recipients.
+              </li>
+            ))}
+          </ul>
+          <p>Recipients missing required values will not be sent this message. Fill in their data or remove these fields from your message.</p>
+          <button onClick={() => isOperational ? changeTab("audience") : changeStep("audience")}>Review audience</button>
+        </div>
+      )}
+      {valSummaryError && (
+        <div className="campaign-notice is-error" role="alert">
+          Could not check personalization data.
+          <button onClick={() => void mutateValSummary()}>Retry validation</button>
+        </div>
+      )}
       <label className="campaign-subject-label" htmlFor="campaign-subject">Subject</label>
       <input
         id="campaign-subject"
@@ -1451,18 +1471,18 @@ function CampaignEditor() {
                         ? "Choose your senders"
                         : activeStep === "schedule"
                           ? "Schedule your campaign"
-                          : "Review and launch"}
+                          : isPaused ? "Review and resume" : "Review and launch"}
                 </h1>
                 <p>
                   {activeStep === "message"
-                    ? "This is a draft. Nothing sends until you review and launch."
+                    ? isPaused ? "Sending is paused. Your changes apply when you resume." : "This is a draft. Nothing sends until you review and launch."
                     : activeStep === "audience"
                       ? "Import your contacts to get started."
                       : activeStep === "senders"
                         ? "Choose the connected email accounts that will send your campaign."
                         : activeStep === "schedule"
                           ? "Choose when your emails should start sending."
-                          : "Check the essentials. You can return to any step before launching."}
+                          : isPaused ? "Check your changes before resuming sending." : "Check the essentials. You can return to any step before launching."}
                 </p>
               </div>
             </div>
@@ -1537,6 +1557,7 @@ function CampaignEditor() {
                 messageReady={messageReady}
                 scheduleError={schedule.problem}
                 ready={launchReady}
+                isPaused={isPaused}
                 onEdit={changeStep}
                 onTest={() => void handleOpenPreview()}
                 testLoading={isPreviewLoading}
@@ -1574,7 +1595,7 @@ function CampaignEditor() {
               onClick={() => void continueStep()}
               disabled={isSaving || Boolean(busyAction) || (stepIndex === 4 && !launchReady)}
             >
-              {stepIndex < 4 ? "Continue" : busyAction === "launch" ? "Launching…" : schedule.draft?.dryRun ? "Launch test run" : "Launch campaign"}
+              {stepIndex < 4 ? "Continue" : busyAction === "resume" ? "Resuming…" : busyAction === "launch" ? "Launching…" : isPaused ? schedule.draft?.dryRun ? "Resume test run" : "Resume sending" : schedule.draft?.dryRun ? "Launch test run" : "Launch campaign"}
               <ArrowRight size={18} />
             </button>
           </div>

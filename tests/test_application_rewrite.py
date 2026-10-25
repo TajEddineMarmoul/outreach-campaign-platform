@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
@@ -42,6 +42,9 @@ def all_day_schedule(cap: int = 10) -> dict[str, dict[str, object]]:
 
 def make_session_factory(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", future=True, connect_args={"check_same_thread": False})
+    # Large batch tests spill SQLite statement journals to TEMP by default.
+    # Keep that scratch space in memory on hosts without a writable OS temp dir.
+    event.listen(engine, "connect", lambda connection, _record: connection.execute("PRAGMA temp_store=MEMORY"))
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 
@@ -141,8 +144,13 @@ def test_sender_group_can_hold_multiple_senders_and_delete_clears_credentials(tm
         delete_group = client.delete(f"/api/sender-groups/{group_id}", headers=HEADERS)
         assert delete_group.status_code == 200
 
-        removed_connect_route = client.post("/api/senders/connect", headers=HEADERS)
-        assert removed_connect_route.status_code == 405
+        # The authenticated MCP catch-all owns unmatched URLs. Check that the
+        # retired endpoint itself is absent rather than depending on its 404/405.
+        assert not any(
+            getattr(route, "path", None) == "/api/senders/connect"
+            and "POST" in getattr(route, "methods", set())
+            for route in app.routes
+        )
     finally:
         clear_session_override()
 
@@ -776,8 +784,16 @@ def test_group_oauth_connect_delete_and_reconnect_stays_in_database(tmp_path, mo
         session.close()
 
         assert list(tmp_path.rglob("*.json")) == [credentials_path]
-        assert client.post("/api/oauth/start", headers=HEADERS).status_code == 404
-        assert client.post("/api/oauth/callback", json={}, headers=HEADERS).status_code == 405
+        assert not any(
+            getattr(route, "path", None) == "/api/oauth/start"
+            and "POST" in getattr(route, "methods", set())
+            for route in app.routes
+        )
+        assert not any(
+            getattr(route, "path", None) == "/api/oauth/callback"
+            and "POST" in getattr(route, "methods", set())
+            for route in app.routes
+        )
     finally:
         clear_session_override()
 

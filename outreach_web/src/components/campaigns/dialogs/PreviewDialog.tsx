@@ -15,6 +15,8 @@ interface PreviewEntry {
   recipient_email: string;
   subject: string;
   body: string;
+  missing_variables: string[];
+  can_send: boolean;
   attachment_name: string;
   attachments: CampaignAttachmentSummary[];
 }
@@ -36,9 +38,8 @@ export default function PreviewDialog({
   campaignId: string;
 }) {
   const [previewIndex, setPreviewIndex] = useState(0);
-  const { data: previews, isLoading, error } = useSWR<PreviewResponse>(
+  const { data: previews, isLoading, isValidating, error } = useSWR<PreviewResponse>(
     isOpen ? `${API_URL}/api/campaigns/${campaignId}/preview?offset=${previewIndex}&limit=1` : null,
-    { keepPreviousData: true }
   );
   const { authFetch } = useApiClient();
   
@@ -46,6 +47,8 @@ export default function PreviewDialog({
   const [testSending, setTestSending] = useState(false);
   const currentPreview = previews?.items?.[0] || null;
   const previewTotal = previews?.total || 0;
+  const missingVariables = currentPreview?.missing_variables || [];
+  const sendingBlocked = currentPreview?.can_send !== true || missingVariables.length > 0;
 
   const [testResult, setTestResult] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
@@ -56,7 +59,7 @@ export default function PreviewDialog({
   };
 
   const handleSendTest = async () => {
-    if (!testEmail.trim() || !currentPreview || testSending || isLoading || error) return;
+    if (!testEmail.trim() || !currentPreview || sendingBlocked || testSending || isLoading || isValidating || error) return;
     setTestSending(true);
     setTestResult(null);
     try {
@@ -156,6 +159,16 @@ export default function PreviewDialog({
               <p>Add at least one recipient to preview this campaign.</p>
             </div>
           ) : (
+            <>
+              {sendingBlocked && (
+                <div className="campaign-notice is-error" role="alert">
+                  <strong>{missingVariables.length ? "Missing personalization data — sending blocked." : "Personalization could not be verified — sending blocked."}</strong>
+                  {missingVariables.length > 0 && (
+                    <p>{missingVariables.map((variable) => `{{${variable}}}`).join(", ")} {missingVariables.length === 1 ? "has" : "have"} no value for {currentPreview.recipient_email}.</p>
+                  )}
+                  <p>Fill in this recipient’s data or remove the missing fields from your message before sending a test. Incomplete recipients will be skipped when the campaign sends.</p>
+                </div>
+              )}
             <div className="border border-slate-200 rounded-lg bg-white overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-100 text-xs flex items-center justify-between gap-3">
                 <span className="text-slate-500 truncate">
@@ -188,6 +201,7 @@ export default function PreviewDialog({
               </div>
             )}
             </div>
+            </>
           )}
         </div>
 
@@ -210,7 +224,7 @@ export default function PreviewDialog({
                 <Button
                   className="bg-slate-800 hover:bg-slate-900 text-white text-xs shrink-0"
                   type="submit"
-                  disabled={testSending || !testEmail.trim() || !currentPreview || isLoading || Boolean(error)}
+                  disabled={testSending || !testEmail.trim() || !currentPreview || sendingBlocked || isLoading || isValidating || Boolean(error)}
                 >
                   {testSending ? "Sending..." : "Send test"}
                 </Button>

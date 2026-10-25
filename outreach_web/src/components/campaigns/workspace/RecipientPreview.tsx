@@ -3,7 +3,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 import { ArrowLeft, ArrowRight, Users, Loader2 } from "lucide-react";
-import { TEMPLATE_VARIABLE_PATTERN } from "@/lib/templateVariables";
+import { missingTemplateVariables, TEMPLATE_VARIABLE_PATTERN } from "@/lib/templateVariables";
 import { emailPreviewDocument } from "./emailPreviewDocument";
 import { API_URL } from "@/lib/api";
 
@@ -27,7 +27,7 @@ export function renderRecipientTemplate(
   html = false,
 ): string {
   return template.replace(TEMPLATE_VARIABLE_PATTERN, (_, key: string) => {
-    const value = fields[key.trim()];
+    const value = Object.hasOwn(fields, key.trim()) ? fields[key.trim()] : undefined;
     const text =
       value === undefined || value === null || String(value).trim() === ""
         ? `[missing ${key.trim()}]`
@@ -76,6 +76,10 @@ export default function RecipientPreview({
     ? body
     : `<p>${escapeHtml(body).replace(/\n/g, "<br>")}</p>`;
   const renderedBody = renderRecipientTemplate(htmlBody, fields, true);
+  const missingVariables = [...new Set([
+    ...missingTemplateVariables(subject, fields),
+    ...missingTemplateVariables(body, fields),
+  ])];
   const previewDocument = emailPreviewDocument(renderedBody);
   return (
     <aside className="campaign-preview" aria-label="Recipient preview">
@@ -131,6 +135,13 @@ export default function RecipientPreview({
               </button>
             </div>
           </div>
+          {missingVariables.length > 0 && (
+            <div className="campaign-notice is-error" role="alert">
+              <strong>Missing personalization data</strong>
+              <p>{missingVariables.map((variable) => `{{${variable}}}`).join(", ")} {missingVariables.length === 1 ? "has" : "have"} no value for this recipient.</p>
+              <p>This recipient will be skipped. Fill in their data or remove these fields from your message.</p>
+            </div>
+          )}
           <div className="campaign-preview-email">
             <div className="campaign-preview-subject">
               Subject:{" "}

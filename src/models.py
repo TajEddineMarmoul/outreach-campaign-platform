@@ -77,6 +77,7 @@ class RenderedEmail(BaseModel):
     subject: str
     body: str
     used_fallback: bool = False
+    missing_variables: list[str] = Field(default_factory=list)
 
 
 def default_config_dict() -> dict[str, Any]:

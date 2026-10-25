@@ -9,8 +9,14 @@ from sqlalchemy.orm import Session
 from api.auth import get_current_user_id
 from src.platform.db import get_session
 from src.platform.models import AutopilotDaySchedule, Campaign, CampaignAttachment, CampaignRecipient
+from src.platform.campaign_capacity import daily_campaign_capacity
 
 router = APIRouter(tags=["campaign-workspace"])
+
+
+@router.get("/api/campaigns/daily-capacity")
+def get_daily_capacity(session: Session = Depends(get_session), user_id: str = Depends(get_current_user_id)):
+    return daily_campaign_capacity(session, user_id)
 
 
 @router.post("/api/campaigns/{campaign_id}/duplicate")

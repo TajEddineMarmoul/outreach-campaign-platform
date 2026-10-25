@@ -236,6 +236,7 @@
   background: #fff;
 }
 .app-table-wrap {
+  position: relative;
   overflow: auto;
   border: 1px solid var(--app-line);
   border-radius: 8px;
@@ -439,6 +440,56 @@
 }
 .app-delivery-progress-summary {
   color: var(--app-muted, #506184);
+  font-size: 12px;
+}
+.app-daily-capacity {
+  width: 190px;
+  max-width: 100%;
+  display: grid;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.app-daily-capacity-values,
+.app-daily-capacity-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  white-space: nowrap;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+.app-daily-capacity-values strong {
+  color: var(--app-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.app-daily-capacity-track {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #edf3ff;
+}
+.app-daily-capacity-track > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+}
+.app-daily-capacity-estimate {
+  background: #b6cdff;
+}
+.app-daily-capacity-sent {
+  background: var(--app-blue);
+}
+.app-daily-capacity-unused {
+  background: repeating-linear-gradient(135deg, transparent 0 3px, #0751f84a 3px 5px);
+}
+.app-daily-capacity-caption {
+  font-size: 11px;
+}
+.app-daily-capacity-empty {
+  display: block;
+  min-width: 190px;
   font-size: 12px;
 }
 .app-progress {

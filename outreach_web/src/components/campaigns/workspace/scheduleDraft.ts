@@ -54,6 +54,8 @@ export function hydrateSchedule(summary: SavedSchedule): ScheduleDraft {
     Intl.DateTimeFormat().resolvedOptions().timeZone ||
     "UTC";
   const saved = summary.autopilot_schedule || [];
+  const defaults = DAYS.map((day) => saved.find((entry) => entry.day === day))
+    .find((entry) => entry !== undefined);
   return {
     mode:
       settings.mode === "send_now" || settings.mode === "schedule"
@@ -67,9 +69,9 @@ export function hydrateSchedule(summary: SavedSchedule): ScheduleDraft {
           day,
           {
             active: saved.length ? Boolean(entry) : index < 5,
-            cap: String(entry?.cap ?? 40),
-            start: entry?.start || "09:00",
-            end: entry?.end || "16:30",
+            cap: String(entry?.cap ?? defaults?.cap ?? 40),
+            start: entry?.start || defaults?.start || "09:00",
+            end: entry?.end || defaults?.end || "16:30",
           },
         ];
       }),
@@ -85,6 +87,32 @@ export function hydrateSchedule(summary: SavedSchedule): ScheduleDraft {
         : "spread_evenly",
     dryRun: Boolean(settings.dry_run),
   };
+}
+
+/** Pick an enabled window for the timezone reference; this is not a delivery estimate. */
+export function scheduleWindowReference(
+  draft: ScheduleDraft,
+  now = Date.now(),
+): string {
+  if (draft.mode === "schedule" || (draft.mode === "autopilot" && draft.startOnDate))
+    return draft.scheduledAt;
+  if (draft.mode !== "autopilot") return "";
+  const localNow = toZonedDateTimeInput(new Date(now).toISOString(), draft.timezone);
+  if (!localNow) return "";
+  // UTC is only used for calendar arithmetic, after resolving the campaign's date.
+  const calendar = new Date(`${localNow.slice(0, 10)}T00:00:00Z`);
+  for (let offset = 0; offset < 8; offset += 1) {
+    const day = DAYS[(calendar.getUTCDay() + 6) % 7];
+    const window = draft.days[day];
+    const wallTime = `${calendar.toISOString().slice(0, 10)}T${window.start}`;
+    if (
+      window.active &&
+      (offset > 0 || localNow.slice(11) <= window.end) &&
+      campaignWallTimeInstant(wallTime, draft.timezone)
+    ) return wallTime;
+    calendar.setUTCDate(calendar.getUTCDate() + 1);
+  }
+  return "";
 }
 
 export function scheduleProblem(
@@ -164,7 +192,9 @@ export function schedulePayload(draft: ScheduleDraft) {
   };
 }
 
-export function launchRequest(draft: ScheduleDraft) {
+export function launchRequest(draft: ScheduleDraft, campaignStatus = "draft") {
+  // Paused delivery continues through /resume after the edited settings are saved.
+  if (campaignStatus === "paused") return { endpoint: "resume", body: {} };
   const { mode, pacing_mode, schedule, scheduled_at, ...common } =
     schedulePayload(draft);
   if (mode === "autopilot")

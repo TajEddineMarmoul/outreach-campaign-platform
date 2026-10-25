@@ -179,6 +179,14 @@ def send_test_email(
     user_id: str = "default_user",
 ) -> tuple[bool, str]:
     from .preview import generate_preview
+    from .template_engine import MissingTemplateVariablesError
+
+    try:
+        rendered = generate_preview(
+            conn, contact_id, user_id, campaign_id=campaign_id, mark=False, strict=True,
+        )
+    except MissingTemplateVariablesError as exc:
+        return False, str(exc)
 
     sender = db.get_campaign_sender(conn, campaign_id) if campaign_id else db.get_default_sender(conn)
     if sender is None and not sender_email:
@@ -198,7 +206,6 @@ def send_test_email(
     attachment = pre_send_attachment_only(config, campaign)
     if not attachment[0]:
         return attachment
-    rendered = generate_preview(conn, contact_id, user_id, campaign_id=campaign_id, mark=False)
     attachment_path = attachment_path_for_send(config, campaign)
     log_id = db.create_send_attempt(
         conn,

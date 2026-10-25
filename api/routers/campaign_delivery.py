@@ -263,6 +263,7 @@ def recipient_template_validation(
     user_id: str,
     *,
     skip_invalid: bool = False,
+    include_pending: bool = False,
 ) -> dict:
     """Report incomplete template data and optionally reject those recipients.
 
@@ -275,6 +276,22 @@ def recipient_template_validation(
         CampaignRecipient.status.is_(None),
         func.trim(CampaignRecipient.status) == "",
     )
+    if include_pending:
+        pending_job = (
+            select(SendJob.id)
+            .where(
+                SendJob.campaign_id == campaign.id,
+                SendJob.user_id == user_id,
+                SendJob.recipient_id == CampaignRecipient.contact_id,
+                SendJob.status.in_(("queued", "retry")),
+            )
+            .exists()
+        )
+        eligible_status = or_(
+            eligible_status,
+            (CampaignRecipient.status == "queued") & pending_job,
+            CampaignRecipient.status == "failed",
+        )
     if skip_invalid:
         # Preserve compatibility with recipients created before the approved
         # server default was introduced.
@@ -590,7 +607,9 @@ def get_recipient_template_validation(
     user_id: str = Depends(get_current_user_id),
 ):
     campaign = require_campaign(session, campaign_id, user_id)
-    return recipient_template_validation(session, campaign, user_id)
+    return recipient_template_validation(
+        session, campaign, user_id, include_pending=campaign.status == "paused",
+    )
 
 
 @router.post("/api/campaigns/{campaign_id}/send-now")

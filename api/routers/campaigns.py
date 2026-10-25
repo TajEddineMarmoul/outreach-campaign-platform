@@ -44,7 +44,7 @@ from src.google_sheets import get_public_sheet_csv, get_published_csv, list_publ
 from src.importer import import_dataframe, normalize_email, detect_columns, is_do_not_contact
 from src.safety import campaign_checklist
 from src.scheduler import send_test_email
-from src.template_engine import extract_template_variables
+from src.template_engine import contact_context, extract_template_variables
 from src.analytics import send_log_dataframe
 from src.platform.db import get_session
 from src.platform.models import Campaign as PlatformCampaign, CampaignAttachment
@@ -963,34 +963,28 @@ def get_campaign_validation_summary(campaign_id: int, conn=Depends(get_db), user
             "all_columns": []
         }
         
-    import json
-    
-    # Initialize dictionary to accumulate empty counts for every field we see
-    column_empty_counts = {}
-
+    # Count missing keys as well as blank cells, including across mixed imports.
+    column_filled_counts: dict[str, int] = {}
     for c in contacts:
-        c = dict(c)
-        custom_str = c.get("custom_fields") or "{}"
-        try:
-            custom_data = custom_str if isinstance(custom_str, dict) else json.loads(custom_str)
-        except Exception:
-            custom_data = {}
-
-        for key, val in custom_data.items():
-            if key not in column_empty_counts:
-                column_empty_counts[key] = 0
-            if val is None or str(val).strip() == "":
-                column_empty_counts[key] += 1
+        for key, value in contact_context(c).items():
+            column_filled_counts.setdefault(key, 0)
+            if value is not None and str(value).strip():
+                column_filled_counts[key] += 1
                 
     used_vars = set()
-    for template_str in [campaign["subject_template"], campaign["body_template"]]:
+    campaign_data = dict(campaign)
+    for template_str in (
+        campaign_data.get("subject_template"),
+        campaign_data.get("body_template") or campaign_data.get("fallback_body_template"),
+    ):
         if template_str:
             used_vars.update(extract_template_variables(str(template_str)))
         
     used_warnings = []
     other_warnings = []
     
-    for key, empty_count in column_empty_counts.items():
+    for key in sorted(set(column_filled_counts) | used_vars):
+        empty_count = total_contacts - column_filled_counts.get(key, 0)
         if empty_count > 0:
             item = {"column": key, "empty_count": empty_count}
             if key in used_vars:
@@ -1002,7 +996,7 @@ def get_campaign_validation_summary(campaign_id: int, conn=Depends(get_db), user
         "total_contacts": total_contacts,
         "used_warnings": used_warnings,
         "other_warnings": other_warnings,
-        "all_columns": sorted(list(column_empty_counts.keys()))
+        "all_columns": sorted(column_filled_counts)
     }
 
 
@@ -1054,6 +1048,8 @@ def get_campaign_preview(
             "first_name": c["first_name"],
             "subject": rendered.subject,
             "body": rendered.body,
+            "missing_variables": rendered.missing_variables,
+            "can_send": not rendered.missing_variables,
             "generated_at": None,
             "attachment_name": ", ".join(attachment_names),
             "attachments": attachment_details,
@@ -1148,7 +1144,7 @@ def post_test_send(campaign_id: int, req: TestSendRequest, conn=Depends(get_db),
                 )
                 if not platform_sender:
                     raise HTTPException(status_code=400, detail="No connected Gmail sender found")
-                rendered = generate_preview(conn, contact_id, user_id, campaign_id=campaign_id, mark=False)
+                rendered = generate_preview(conn, contact_id, user_id, campaign_id=campaign_id, mark=False, strict=True)
                 stored_attachments = platform_session.scalars(
                     select(CampaignAttachment)
                     .where(CampaignAttachment.campaign_id == campaign_id)

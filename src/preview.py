@@ -17,7 +17,15 @@ class EmailPreview:
     attachment_path: str
 
 
-def generate_preview(conn, contact_id: int, user_id: str, campaign_id: int | None = None, mark: bool = True) -> EmailPreview:
+def generate_preview(
+    conn,
+    contact_id: int,
+    user_id: str,
+    campaign_id: int | None = None,
+    mark: bool = True,
+    *,
+    strict: bool = False,
+) -> EmailPreview:
     contact = db.fetch_contact(conn, contact_id, user_id)
     if contact is None:
         raise ValueError(f"Contact {contact_id} not found")
@@ -32,7 +40,7 @@ def generate_preview(conn, contact_id: int, user_id: str, campaign_id: int | Non
     if campaign is None:
         raise ValueError("Campaign not found")
 
-    rendered: RenderedEmail = render_email(contact, campaign)
+    rendered: RenderedEmail = render_email(contact, campaign, strict=strict)
     if mark:
         db.mark_preview_generated(conn, contact_id, rendered.subject, rendered.body, user_id)
     return EmailPreview(
