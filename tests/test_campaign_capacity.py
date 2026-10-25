@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import random
 
 import pytest
 from fastapi import FastAPI
@@ -7,7 +8,7 @@ from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
 
 from api.routers import campaign_workspace
-from src.platform.campaign_capacity import _share_capacity, daily_campaign_capacity
+from src.platform.campaign_capacity import _share_capacity, _share_sender_capacity, daily_campaign_capacity
 from src.platform.models import Base, Campaign, CampaignRecipient, Contact, Sender, SenderGroup, SendJob, SendLog, AutopilotDaySchedule, UserSettings
 from src.platform.services import ensure_user
 
@@ -158,6 +159,55 @@ def test_separate_sender_groups_have_independent_capacity(session):
     result = items(session)
     assert result[first.id]["estimated_total_today"] == 10
     assert result[second.id]["estimated_total_today"] == 20
+
+
+def test_overlapping_groups_share_one_account_quota_and_sent_history(session):
+    a, sender = group(session, name="A", cap=10)
+    b = SenderGroup(user_id=USER, name="B", members=[sender])
+    session.add(b)
+    session.flush()
+    first, second = campaign(session, a), campaign(session, b)
+    sent(session, first, sender, 2)
+    result = items(session)
+    assert result[first.id]["estimated_total_today"] == 6
+    assert result[second.id]["estimated_total_today"] == 4
+    assert sum(item["estimated_total_today"] for item in result.values()) == 10
+    assert all(item["daily_limit"] == 10 and item["competing_campaigns"] == 1 for item in result.values())
+
+
+def test_overlap_does_not_strand_alternate_accounts_or_duplicate_legacy_membership(session):
+    a, sender = group(session, name="A", cap=10)
+    b, extra = group(session, name="B", cap=20)
+    a.members.append(sender)  # Backfilled legacy membership must count once.
+    b.members.extend([sender, extra])
+    first, second = campaign(session, a), campaign(session, b)
+    result = items(session)
+    assert result[first.id]["daily_limit"] == 10 and result[second.id]["daily_limit"] == 30
+    assert result[first.id]["estimated_total_today"] == 10
+    assert result[second.id]["estimated_total_today"] == 20
+
+
+def test_overlapping_capacity_reassigns_alternates_to_keep_scarce_accounts_available():
+    assert _share_sender_capacity({1: 1, 2: 1, 3: 1}, {1: {1, 2}, 2: {2, 3}, 3: {1}}, {1: 1, 2: 1, 3: 1}) == {1: 1, 2: 1, 3: 1}
+    assert _share_sender_capacity({1: 5, 2: 5}, {1: {1}, 2: {1}}, {1: 5}) == {1: 3, 2: 2}
+
+
+def test_overlapping_allocations_fit_every_shared_pool_and_use_all_feasible_capacity():
+    rng = random.Random(37)
+    for _ in range(100):
+        demand = {key: rng.randrange(6) for key in range(4)}
+        choices = {key: {sender for sender in range(3) if rng.choice((False, True))} for key in demand}
+        capacity = {sender: rng.randrange(6) for sender in range(3)}
+        allocation = _share_sender_capacity(demand, choices, capacity)
+        assert all(0 <= allocation[key] <= demand[key] for key in demand)
+        cut_bounds = []
+        for bits in range(1 << 4):
+            subset = {key for key in demand if bits & (1 << key)}
+            pool = set().union(*(choices[key] for key in subset))
+            available = sum(capacity[sender] for sender in pool)
+            assert sum(allocation[key] for key in subset) <= available
+            cut_bounds.append(sum(demand[key] for key in demand if key not in subset) + available)
+        assert sum(allocation.values()) == min(cut_bounds)
 
 
 def test_missing_personalization_and_dry_runs_do_not_consume_projected_capacity(session):

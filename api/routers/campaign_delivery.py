@@ -22,7 +22,7 @@ from src.platform.db import get_session
 from src.platform.jobs import create_send_jobs_for_next_batch, has_unsent_approved_recipients
 from src.platform.models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, EmailTrackingEvent, GmailActivityEvent, SendJob, SendLog, Sender
 from src.platform.scheduler import WEEKDAY_NAMES, next_autopilot_run
-from src.platform.services import autopilot_reschedule_state, campaign_daily_capacity, campaign_zone, connected_senders, ensure_user, require_group, serialize_group, user_zone, validate_timezone_name
+from src.platform.services import autopilot_reschedule_state, campaign_daily_capacity, campaign_zone, connected_senders, ensure_user, require_group, sender_group_filter, serialize_group, user_zone, validate_timezone_name
 from src.platform.time import utcnow
 from src.platform.worker import recover_stale_jobs, run_worker_cycle
 from src.template_engine import extract_template_variables, missing_template_variables
@@ -1315,7 +1315,7 @@ def post_campaign_gmail_activity_sync(
             session.scalars(
                 select(Sender.id).where(
                     Sender.user_id == user_id,
-                    Sender.group_id == campaign.selected_sender_group_id,
+                    sender_group_filter(campaign.selected_sender_group_id),
                     Sender.status == "connected",
                 )
             )

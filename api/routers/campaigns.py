@@ -48,6 +48,7 @@ from src.template_engine import contact_context, extract_template_variables
 from src.analytics import send_log_dataframe
 from src.platform.db import get_session
 from src.platform.models import Campaign as PlatformCampaign, CampaignAttachment
+from src.platform.services import connected_senders, sender_group_filter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -303,7 +304,7 @@ def get_campaign_summary(campaign_id: int, conn=Depends(get_db), user_id: str = 
                 sender_group_capacity = group_payload
                 sender_emails = [
                     sender.email
-                    for sender in group.senders
+                    for sender in connected_senders(group)
                     if sender.status == "connected" and sender.encrypted_oauth_credentials
                 ]
         finally:
@@ -1138,7 +1139,7 @@ def post_test_send(campaign_id: int, req: TestSendRequest, conn=Depends(get_db),
                 platform_sender = platform_session.scalar(
                     select(PlatformSender).where(
                         PlatformSender.user_id == user_id,
-                        PlatformSender.group_id == platform_campaign.selected_sender_group_id,
+                        sender_group_filter(platform_campaign.selected_sender_group_id),
                         PlatformSender.status == "connected",
                     ).order_by(PlatformSender.is_default.desc(), PlatformSender.id).limit(1)
                 )

@@ -5,7 +5,7 @@ from math import ceil
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Iterable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from src.gmail_sender import GMAIL_READONLY_SCOPE
@@ -185,7 +185,7 @@ def set_user_timezone(session: Session, user_id: str, timezone_name: str) -> boo
 def require_group(session: Session, user_id: str, group_id: int) -> SenderGroup:
     group = session.scalar(
         select(SenderGroup)
-        .options(selectinload(SenderGroup.senders))
+        .options(selectinload(SenderGroup.senders), selectinload(SenderGroup.members))
         .where(SenderGroup.id == group_id, SenderGroup.user_id == user_id)
     )
     if not group:
@@ -193,9 +193,18 @@ def require_group(session: Session, user_id: str, group_id: int) -> SenderGroup:
     return group
 
 
+def group_senders(group: SenderGroup) -> list[Sender]:
+    """Return each saved account once, including its original legacy membership."""
+    return list({sender.id: sender for sender in [*group.senders, *getattr(group, "members", [])]}.values())
+
+
+def sender_group_filter(group_id: int):
+    return or_(Sender.group_id == group_id, Sender.groups.any(SenderGroup.id == group_id))
+
+
 def connected_senders(group: SenderGroup) -> list[Sender]:
     return sorted(
-        [sender for sender in group.senders if sender.status == "connected" and sender.encrypted_oauth_credentials],
+        [sender for sender in group_senders(group) if sender.status == "connected" and sender.encrypted_oauth_credentials],
         key=lambda sender: sender.id,
     )
 
@@ -520,6 +529,7 @@ def serialize_sender(session: Session, sender: Sender) -> dict:
     return {
         "id": sender.id,
         "group_id": sender.group_id,
+        "group_ids": sorted({group.id for group in sender.groups} | ({sender.group_id} if sender.group_id is not None else set())),
         "email": sender.email,
         "display_name": sender.display_name,
         "daily_cap": sender.daily_cap,
@@ -541,7 +551,7 @@ def serialize_sender(session: Session, sender: Sender) -> dict:
 
 
 def serialize_group(session: Session, group: SenderGroup) -> dict:
-    active_senders = [s for s in group.senders if s.status != "removed"]
+    active_senders = [s for s in group_senders(group) if s.status != "removed"]
     connected = [s for s in active_senders if s.status == "connected" and s.encrypted_oauth_credentials]
     return {
         "id": group.id,
@@ -550,6 +560,7 @@ def serialize_group(session: Session, group: SenderGroup) -> dict:
         "updated_at": group.updated_at.isoformat(),
         "senders": [serialize_sender(session, sender) for sender in active_senders],
         "connected_sender_count": len(connected),
+        "sender_count": len(active_senders),
         "total_daily_cap": sum(sender.daily_cap for sender in connected),
         "error_sender_count": len([s for s in active_senders if s.status == "error"]),
     }
@@ -574,7 +585,6 @@ def upsert_connected_sender(
         select(Sender).where(Sender.user_id == user_id, Sender.is_default == 1, Sender.status != "removed")
     )
     if sender:
-        sender.group_id = group_id
         sender.display_name = display_name or sender.display_name or ""
         sender.encrypted_oauth_credentials = encrypted_credentials
         sender.scopes = granted_scopes
@@ -612,6 +622,10 @@ def upsert_connected_sender(
             is_default=1 if existing_default is None else 0,
         )
         session.add(sender)
+    session.flush()
+    group = require_group(session, user_id, group_id)
+    if sender not in group.members:
+        group.members.append(sender)
     session.flush()
     return sender
 

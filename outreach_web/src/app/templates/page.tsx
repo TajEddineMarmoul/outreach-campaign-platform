@@ -1,12 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import useSWR from "swr";
-import { FileText, Plus } from "lucide-react";
+import { ArrowLeft, Braces, FileText, Plus } from "lucide-react";
+import type { Editor } from "@tiptap/react";
+import EmailComposer from "@/components/EmailComposer";
+import { extractTemplateVariables } from "@/lib/templateVariables";
+import type { EmailTemplate as Template } from "@/lib/templateMapping";
+import "@/components/templates/templates.css";
 import { checkResponse, errorMessage, useApiClient } from "@/lib/api";
 import {
   ActionMenu,
-  AppDialog,
   ConfirmDialog,
   MenuAction,
   Notice,
@@ -17,13 +21,6 @@ import {
   formatDate,
 } from "@/components/app-ui";
 
-interface Template {
-  id: number;
-  title: string;
-  subject: string;
-  body: string;
-  updated_at?: string;
-}
 const emptyTemplate = { title: "", subject: "", body: "" };
 const PAGE_SIZE = 6;
 
@@ -43,6 +40,17 @@ export default function TemplatesPage() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
   const [message, setMessage] = useState("");
+  const [fieldName, setFieldName] = useState("");
+  const editorRef = useRef<Editor | null>(null);
+  const editorReady = useCallback((editor: Editor | null) => { editorRef.current = editor; }, []);
+  const variables = [...new Set([...extractTemplateVariables(draft.subject), ...extractTemplateVariables(draft.body)])];
+  const insertField = (target: "subject" | "body", field = fieldName.trim()) => {
+    if (!field || /[{}]/.test(field)) return;
+    const placeholder = `{{ ${field} }}`;
+    if (target === "body" && editorRef.current && !editorRef.current.isDestroyed) {
+      editorRef.current.chain().focus().insertContent({ type: "text", text: placeholder }).run();
+    } else setDraft({ ...draft, [target]: draft[target] + placeholder });
+  };
   const filtered = templates.filter((item) =>
     `${item.title} ${item.subject}`
       .toLowerCase()
@@ -59,6 +67,7 @@ export default function TemplatesPage() {
   };
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (busy) return;
     setBusy(true);
     setActionError("");
     try {
@@ -105,6 +114,28 @@ export default function TemplatesPage() {
       setBusy(false);
     }
   };
+  if (editing !== null) return (
+    <div className="app-page template-editor-page">
+      <form className="app-form" onSubmit={save}>
+        <PageHeading title={editing === "new" ? "New template" : "Edit template"} description="Write and format your email just as you would in a campaign."
+          actions={<><button type="button" className="app-button" disabled={busy} onClick={() => setEditing(null)}><ArrowLeft size={16} />Templates</button>
+            <button className="app-button is-primary" disabled={busy || !draft.title.trim() || !draft.subject.trim() || !draft.body.replace(/<[^>]*>/g, "").trim()}>{busy ? "Saving…" : "Save template"}</button></>} />
+        <Notice error={actionError} />
+        <label className="app-field template-editor-name">Template name<input autoFocus required maxLength={240} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} disabled={busy} /></label>
+        <section className="campaign-ui campaign-composer" aria-label="Write template email">
+          <div className="template-placeholder-tools">
+            <label className="app-field">Personalization field<input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. first_name" disabled={busy} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); insertField("body"); } }} /></label>
+            <button type="button" className="app-button" disabled={busy || !fieldName.trim() || /[{}]/.test(fieldName)} onClick={() => insertField("subject")}><Braces size={16} />Add to subject</button>
+            <button type="button" className="app-button" disabled={busy || !fieldName.trim() || /[{}]/.test(fieldName)} onClick={() => insertField("body")}><Braces size={16} />Add to message</button>
+          </div>
+          {variables.length > 0 && <div className="template-editor-fields" aria-label="Template fields">{variables.map((field) => <button type="button" key={field} onClick={() => insertField("body", field)} disabled={busy}>{`{{${field}}}`}</button>)}</div>}
+          <EmailComposer subject={draft.subject} body={draft.body} onSubjectChange={(subject) => setDraft((current) => ({ ...current, subject }))}
+            onBodyChange={(body) => setDraft((current) => ({ ...current, body }))} validVariables={variables} onEditorReady={editorReady} readOnly={busy} />
+        </section>
+        <p className="app-muted template-mapping-copy">When you load this template into a campaign, you’ll match its placeholders to that campaign’s audience fields.</p>
+      </form>
+    </div>
+  );
   return (
     <div className="app-page">
       <PageHeading
@@ -202,78 +233,6 @@ export default function TemplatesPage() {
           onChange={setPage}
         />
       )}
-      <AppDialog
-        open={editing !== null}
-        onClose={() => {
-          if (!busy) setEditing(null);
-        }}
-        title={editing === "new" ? "New template" : "Edit template"}
-        description="This is a reusable template. Saving it does not send an email or change existing campaigns."
-      >
-        <form className="app-form" onSubmit={save}>
-          <label className="app-field">
-            Template name
-            <input
-              autoFocus
-              required
-              maxLength={240}
-              value={draft.title}
-              onChange={(event) =>
-                setDraft({ ...draft, title: event.target.value })
-              }
-            />
-          </label>
-          <label className="app-field">
-            Subject
-            <input
-              required
-              maxLength={998}
-              value={draft.subject}
-              onChange={(event) =>
-                setDraft({ ...draft, subject: event.target.value })
-              }
-            />
-          </label>
-          <label className="app-field">
-            Message
-            <textarea
-              aria-label="Message"
-              aria-describedby="template-message-hint"
-              required
-              value={draft.body}
-              onChange={(event) =>
-                setDraft({ ...draft, body: event.target.value })
-              }
-            />
-            <small id="template-message-hint">
-              Personalize with variables such as {"{{first_name}}"}. HTML is
-              preserved if your template already uses it.
-            </small>
-          </label>
-          <Notice error={actionError} />
-          <div className="app-dialog-actions">
-            <button
-              type="button"
-              className="app-button"
-              disabled={busy}
-              onClick={() => setEditing(null)}
-            >
-              Cancel
-            </button>
-            <button
-              className="app-button is-primary"
-              disabled={
-                busy ||
-                !draft.title.trim() ||
-                !draft.subject.trim() ||
-                !draft.body.trim()
-              }
-            >
-              {busy ? "Saving…" : "Save template"}
-            </button>
-          </div>
-        </form>
-      </AppDialog>
       <ConfirmDialog
         open={!!removing}
         title="Delete template?"

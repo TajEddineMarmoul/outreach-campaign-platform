@@ -1,6 +1,7 @@
 export interface Sender {
   id: number;
-  group_id: number;
+  group_id: number | null;
+  group_ids: number[];
   email: string;
   display_name: string;
   status: string;
@@ -27,6 +28,7 @@ export interface SenderGroup {
   updated_at: string;
   senders: Sender[];
   connected_sender_count: number;
+  sender_count: number;
   total_daily_cap: number;
   error_sender_count: number;
 }

@@ -4,7 +4,8 @@ import useSWR, { mutate } from "swr";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Loader2, Plus, CheckCircle, Trash2, FolderPlus, AtSign, Pencil, Check, X } from "lucide-react";
+import { Plus, CheckCircle, Trash2, FolderPlus, AtSign, Pencil, Check, X } from "lucide-react";
+import AddSenderDialog from "@/components/senders/AddSenderDialog";
 import { cn } from "@/lib/utils";
 import {
   API_URL,
@@ -79,12 +80,16 @@ export default function SenderSelectionDialog({
   senderGroups: initialGroups,
   selectedGroupId,
   onSelect,
+  returnPath,
+  beforeConnect,
 }: {
   isOpen: boolean;
   onClose: () => void;
   senderGroups?: SenderGroup[];
   selectedGroupId?: number | null;
   onSelect: (senderGroupId: number) => void;
+  returnPath?: string;
+  beforeConnect?: () => Promise<void>;
 }) {
   const { data: groupsData, mutate: mutateGroups } = useSWR<SenderGroup[]>(
     isOpen ? `${API_URL}/api/sender-groups` : null,
@@ -95,7 +100,7 @@ export default function SenderSelectionDialog({
 
   const [newGroupName, setNewGroupName] = useState("");
   const [addingGroup, setAddingGroup] = useState(false);
-  const [connectingGroupId, setConnectingGroupId] = useState<number | null>(null);
+  const [addingSenderGroup, setAddingSenderGroup] = useState<SenderGroup | null>(null);
   const [connectError, setConnectError] = useState("");
 
   const request = async <T = Record<string, unknown>>(
@@ -117,6 +122,10 @@ export default function SenderSelectionDialog({
   };
 
   const handlePatchSender = async (id: number, patch: Partial<Sender>) => {
+    if (patch.daily_cap !== undefined && (!Number.isInteger(patch.daily_cap) || patch.daily_cap < 1 || patch.daily_cap > 500)) {
+      setConnectError("Enter a daily limit from 1 to 500.");
+      return;
+    }
     try {
       await request(
         `/api/senders/${id}`,
@@ -133,10 +142,10 @@ export default function SenderSelectionDialog({
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (groupId: number, id: number) => {
     try {
       await request(
-        `/api/senders/${id}`,
+        `/api/sender-groups/${groupId}/senders/${id}`,
         { method: "DELETE" },
         "Could not remove sender",
       );
@@ -165,23 +174,6 @@ export default function SenderSelectionDialog({
     }
   };
 
-  const handleConnectToGroup = async (groupId: number) => {
-    setConnectingGroupId(groupId);
-    setConnectError("");
-    try {
-      const { auth_url } = await request<{ auth_url?: string }>(
-        `/api/sender-groups/${groupId}/senders/oauth/start`,
-        { method: "POST" },
-        "Failed to start Gmail OAuth",
-      );
-      if (!auth_url) throw new Error("OAuth start did not return an authorization URL");
-      window.location.href = auth_url;
-    } catch (error: unknown) {
-      setConnectError(errorMessage(error, "Could not reach backend"));
-      setConnectingGroupId(null);
-    }
-  };
-
   const handleCreateGroup = async () => {
     const name = newGroupName.trim();
     if (!name) return;
@@ -204,13 +196,17 @@ export default function SenderSelectionDialog({
     }
   };
 
+  if (isOpen && addingSenderGroup) {
+    return <AddSenderDialog group={addingSenderGroup} onClose={() => setAddingSenderGroup(null)} onAdded={refreshGroups} returnPath={returnPath} beforeConnect={beforeConnect} />;
+  }
+
   return (
     <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="sm:max-w-xl max-h-[85vh] flex flex-col p-6">
         <DialogHeader className="flex flex-row items-center justify-between space-y-0 pb-2 border-b border-slate-100 shrink-0">
           <div>
             <DialogTitle className="text-xl font-bold text-slate-900">Choose Campaign Sender Group</DialogTitle>
-            <p className="text-xs text-slate-500 mt-1">Click a group to select it. Account rows are only for management.</p>
+            <p className="text-xs text-slate-500 mt-1">Choose a group or expand it to see its accounts. Shared accounts use one daily limit.</p>
           </div>
           <Button
             size="sm"
@@ -272,7 +268,6 @@ export default function SenderSelectionDialog({
             </div>
           ) : (
             groups.map((group) => {
-              const isConnecting = connectingGroupId === group.id;
               const isSelectedGroup = selectedGroupId === group.id;
               return (
                 <div
@@ -282,15 +277,6 @@ export default function SenderSelectionDialog({
                   }`}
                 >
                   <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => onSelect(group.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        onSelect(group.id);
-                      }
-                    }}
                     className="flex items-center justify-between px-4 py-2 bg-white border-b border-slate-100 cursor-pointer hover:bg-blue-50/40"
                   >
                     <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
@@ -301,34 +287,39 @@ export default function SenderSelectionDialog({
                         className="text-xs font-bold text-slate-700"
                       />
                       <span className="text-[10px] font-normal text-slate-400">
-                        ({group.connected_sender_count} connected, {group.total_daily_cap}/day)
+                        ({group.senders.length} accounts, {group.connected_sender_count} connected)
                       </span>
                     </div>
 
+                    <div className="flex items-center gap-2">
+                    <Button size="sm" variant={isSelectedGroup ? "default" : "outline"} onClick={() => onSelect(group.id)} className="h-7 text-[10px] px-2">
+                      {isSelectedGroup ? "Selected" : "Use group"}
+                    </Button>
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleConnectToGroup(group.id);
+                        setAddingSenderGroup(group);
                       }}
-                      disabled={isConnecting}
                       className="h-7 text-[10px] gap-1 px-2 border-slate-200 hover:border-blue-300 hover:text-blue-600 cursor-pointer"
                     >
-                      {isConnecting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                      {isConnecting ? "Opening..." : "Add sender"}
+                      <Plus className="w-3 h-3" /> Add sender
                     </Button>
+                    </div>
                   </div>
 
-                  <div className="p-3 space-y-2">
+                  <details className="p-3 space-y-2">
+                    <summary className="text-xs text-slate-500 cursor-pointer">Show {group.senders.length} {group.senders.length === 1 ? "account" : "accounts"}</summary>
+                    <p className="text-[10px] text-slate-500">Account names and daily limits are shared across all their groups.</p>
                     {group.senders.length === 0 ? (
                       <div className="text-center py-4 text-xs text-slate-400">
                         No senders in this group.{" "}
                         <button
-                          onClick={() => handleConnectToGroup(group.id)}
+                          onClick={() => setAddingSenderGroup(group)}
                           className="text-blue-500 hover:underline cursor-pointer font-medium"
                         >
-                          Connect one
+                          Add one
                         </button>
                       </div>
                     ) : (
@@ -360,18 +351,19 @@ export default function SenderSelectionDialog({
                                 <span>Cap:</span>
                                 <InlineEditSender
                                   value={sender.daily_cap}
-                                  onSave={(v) => handlePatchSender(sender.id, { daily_cap: parseInt(v) || 10 })}
+                                  onSave={(v) => handlePatchSender(sender.id, { daily_cap: Number(v) })}
                                   className="font-bold text-slate-700"
                                 />
                                 <span>/day</span>
                               </div>
 
                               <button
-                                title="Remove sender"
+                                title="Remove from this group"
+                                aria-label={`Remove ${sender.email} from ${group.name}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (confirm(`Remove sender ${sender.email}?`)) {
-                                    handleDelete(sender.id);
+                                  if (confirm(`Remove ${sender.email} from ${group.name}? Its saved connection and other groups will stay connected.`)) {
+                                    handleDelete(group.id, sender.id);
                                   }
                                 }}
                                 className="p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors cursor-pointer shrink-0"
@@ -383,7 +375,7 @@ export default function SenderSelectionDialog({
                         );
                       })
                     )}
-                  </div>
+                  </details>
                 </div>
               );
             })

@@ -47,7 +47,9 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import RichTextEditor from "@/components/RichTextEditor";
+import EmailComposer from "@/components/EmailComposer";
+import LoadTemplateDialog from "@/components/templates/LoadTemplateDialog";
+import SaveTemplateDialog from "@/components/templates/SaveTemplateDialog";
 import type { Editor } from "@tiptap/react";
 import ScheduleDialog from "@/components/campaigns/dialogs/ScheduleDialog";
 import AutopilotDailyLimitsDialog from "@/components/campaigns/dialogs/AutopilotDailyLimitsDialog";
@@ -129,7 +131,8 @@ function CampaignEditor() {
   const router = useRouter();
   const campaignId = String(params.id);
   const searchParams = useSearchParams();
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(() => searchParams.get("oauth") === "error"
+    ? "Gmail was not connected. Your campaign changes are saved; you can try connecting again." : "");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [endDialogOpen, setEndDialogOpen] = useState(false);
   const [variablesOpen, setVariablesOpen] = useState(false);
@@ -447,7 +450,7 @@ function CampaignEditor() {
   // Modal open states
   const [sendModalOpen, setSendModalOpen] = useState(false);
   const [sendTab, setSendTab] = useState("send-now");
-  const [senderModalOpen, setSenderModalOpen] = useState(false);
+  const [senderModalOpen, setSenderModalOpen] = useState(() => searchParams.get("sender_setup") === "1");
   const [recipientsModalOpen, setRecipientsModalOpen] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
@@ -460,6 +463,8 @@ function CampaignEditor() {
     number | null
   >(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
+  const [templateSaved, setTemplateSaved] = useState(false);
   const [trackingBusy, setTrackingBusy] = useState(false);
 
   const handleAttachmentUploadChange = useCallback(
@@ -835,6 +840,14 @@ function CampaignEditor() {
   const changeTab = (value: string) => {
     void navigateSafely(`/campaigns/${campaignId}?tab=${value}`);
   };
+  const closeSenderDialog = () => {
+    setSenderModalOpen(false);
+    if (searchParams.get("sender_setup") === "1") {
+      const query = new URLSearchParams(searchParams.toString());
+      for (const key of ["sender_setup", "oauth", "group_id", "sender_id", "message"]) query.delete(key);
+      router.replace(`/campaigns/${campaignId}${query.size ? `?${query}` : ""}`);
+    }
+  };
   const stepIndex = CAMPAIGN_STEPS.indexOf(activeStep);
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
@@ -1046,6 +1059,8 @@ function CampaignEditor() {
             </button>
           </PopoverContent>
         </Popover>
+        <button className="campaign-button is-quiet" disabled={!subject.trim() || !body.replace(/<[^>]*>/g, "").trim()}
+          onClick={() => { setTemplateSaved(false); setSaveTemplateOpen(true); }}><FileText size={17} />Save as template</button>
         <div className="campaign-guide-anchor">
           <button className="campaign-button is-outline" onClick={() => void handleOpenPreview()} disabled={isPreviewLoading}>
             <Eye size={17} /> {isPreviewLoading ? "Opening…" : isOperational ? "Preview message" : "Preview draft"}
@@ -1053,6 +1068,7 @@ function CampaignEditor() {
           {!previewModalOpen && !messageToolsOpen && !variablesOpen && !attachmentModalOpen && !templateModalOpen && guideFor("message")}
         </div>
       </div>
+      {templateSaved && <div className="campaign-notice" role="status">Template saved. You can view or edit it from Templates.</div>}
       {missingValueWarnings.length > 0 && (
         <div className="campaign-notice is-error" role="alert">
           <strong>Missing personalization data</strong>
@@ -1073,28 +1089,9 @@ function CampaignEditor() {
           <button onClick={() => void mutateValSummary()}>Retry validation</button>
         </div>
       )}
-      <label className="campaign-subject-label" htmlFor="campaign-subject">Subject</label>
-      <input
-        id="campaign-subject"
-        className="campaign-subject"
-        placeholder="A clear reason to open your email"
-        value={subject}
-        onChange={(event) => updateSubjectDraft(event.target.value)}
-        onBlur={() => void flushComposerDraft().catch(() => undefined)}
-        disabled={editingLocked}
-      />
-      <div className="campaign-editor-frame">
-        <RichTextEditor
-          content={body}
-          onChange={updateBodyDraft}
-          onBlur={() => void flushComposerDraft().catch(() => undefined)}
-          placeholder="Write your email here…"
-          validVariables={activeVariables}
-          onEditorReady={handleEditorReady}
-          readOnly={editingLocked}
-          minimalToolbar
-        />
-      </div>
+      <EmailComposer subject={subject} body={body} onSubjectChange={updateSubjectDraft} onBodyChange={updateBodyDraft}
+        onBlur={() => void flushComposerDraft().catch(() => undefined)} validVariables={activeVariables}
+        onEditorReady={handleEditorReady} readOnly={editingLocked} />
       {attachmentUploads.length > 0 && (
         <section
           className="campaign-attachment-uploads"
@@ -1666,14 +1663,16 @@ function CampaignEditor() {
       {/* B. Select Sender Modal */}
       <SenderSelectionDialog
         isOpen={senderModalOpen}
-        onClose={() => setSenderModalOpen(false)}
+        onClose={closeSenderDialog}
         senderGroups={senderGroups || []}
+        returnPath={`/campaigns/${campaignId}?${new URLSearchParams({ ...(isOperational ? { tab } : { step: activeStep }), sender_setup: "1" })}`}
+        beforeConnect={async () => { if (!editingLocked) await saveCampaignChanges(activeStep === "schedule"); }}
         selectedGroupId={
           summary?.sender_group_id || selectedSenderGroup?.id || null
         }
         onSelect={async (senderGroupId) => {
           await handleSelectSenderGroup(senderGroupId);
-          setSenderModalOpen(false);
+          closeSenderDialog();
         }}
       />
 
@@ -1712,79 +1711,17 @@ function CampaignEditor() {
       />
 
       {/* F. Template Modal */}
-      <TemplateDialog
-        isOpen={templateModalOpen}
+      {templateModalOpen && <LoadTemplateDialog
+        summary={valSummary} validationError={Boolean(valSummaryError)} onRetry={() => void mutateValSummary()}
         onClose={() => setTemplateModalOpen(false)}
-        onSelect={(tplSub, tplBody) => {
+        onLoad={(tplSub, tplBody) => {
           updateSubjectDraft(tplSub);
           updateBodyDraft(tplBody);
           setTemplateModalOpen(false);
         }}
-      />
+      />}
+      {saveTemplateOpen && <SaveTemplateDialog subject={subject} body={body} defaultName={name || subject}
+        onClose={() => setSaveTemplateOpen(false)} onSaved={() => { setSaveTemplateOpen(false); setTemplateSaved(true); }} />}
     </div>
-  );
-}
-
-// ----------------------------------------------------
-// Dialog Components Helpers
-// ----------------------------------------------------
-
-// 6. Template Dialog
-function TemplateDialog({
-  isOpen,
-  onClose,
-  onSelect,
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  onSelect: (subject: string, body: string) => void;
-}) {
-  const { data: templates } = useSWR(
-    isOpen ? `${API_URL}/api/templates` : null,
-  );
-  const list = Array.isArray(templates) ? templates : [];
-
-  return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Select email template</DialogTitle>
-        </DialogHeader>
-        <div className="py-4 space-y-4">
-          {list.length === 0 ? (
-            <p className="text-center text-sm text-slate-400 py-8">
-              No templates yet. Create one from the Templates page.
-            </p>
-          ) : (
-            list.map(
-              (t: {
-                id: number;
-                title: string;
-                subject: string;
-                body: string;
-              }) => (
-                <div
-                  key={t.id}
-                  className="border border-slate-200 hover:border-blue-400 rounded-lg p-4 cursor-pointer hover:bg-blue-50/10 transition-all space-y-2"
-                  onClick={() => onSelect(t.subject, t.body)}
-                >
-                  <h3 className="font-bold text-slate-800 text-sm">
-                    {t.title}
-                  </h3>
-                  <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
-                    {t.body}
-                  </p>
-                </div>
-              ),
-            )
-          )}
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

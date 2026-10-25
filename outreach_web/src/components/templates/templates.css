@@ -1,0 +1,50 @@
+.template-editor-page { max-width: 1040px; }
+.template-editor-name { margin-bottom: 22px; }
+.template-editor-page .campaign-composer { border: 1px solid var(--app-line); border-radius: 8px; padding: 22px; }
+.template-placeholder-tools { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 18px; }
+.template-placeholder-tools .app-field { flex: 1; min-width: 180px; }
+.template-editor-fields { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
+.template-editor-fields button { border: 1px solid var(--app-line); padding: 4px 9px; border-radius: 5px; color: var(--app-blue); font-size: 13px; }
+.app-ui.app-dialog:has(.template-load-dialog), .app-ui.app-dialog:has(.template-mapping-preview) { width: min(800px, calc(100vw - 32px)) !important; max-width: min(800px, calc(100vw - 32px)) !important; }
+.template-picker-list { display: grid; gap: 10px; margin-top: 18px; }
+.template-picker-item { display: flex; gap: 14px; align-items: center; padding: 16px; border: 1px solid var(--app-line); border-radius: 7px; text-align: left; background: white; color: var(--app-ink); }
+.template-picker-item:hover { border-color: var(--app-blue); background: #f7f9ff; }
+.template-picker-item > span { display: grid; gap: 5px; flex: 1; min-width: 0; }
+.template-picker-item strong, .template-picker-item small { overflow-wrap: anywhere; }
+.template-picker-item small { color: var(--app-muted); font-size: 13px; }
+.template-mapping-heading { font-size: 17px; font-weight: 600; margin: 20px 0 6px; }
+.template-mapping-copy { font-size: 13px; line-height: 1.6; margin-bottom: 18px; }
+.template-mapping-rows { display: grid; gap: 18px; margin: 20px 0; }
+.template-mapping-row { display: grid; grid-template-columns: minmax(100px, .8fr) 20px minmax(180px, 1.2fr); gap: 12px; align-items: start; }
+.template-mapping-row > code { font-size: 13px; overflow-wrap: anywhere; padding-top: 12px; }
+.template-mapping-row > svg { margin-top: 12px; color: var(--app-muted); }
+.template-field-select { position: relative; min-width: 0; }
+.template-field-input { display: flex; border: 1px solid var(--app-line); border-radius: 6px; background: white; min-height: 44px; }
+.template-field-input:focus-within { outline: 2px solid #94baff; outline-offset: 1px; }
+.template-field-input input { border: 0; background: transparent; width: 100%; min-width: 0; padding: 10px 12px; outline: none; font: inherit; font-size: 14px; }
+.app-ui .template-field-input input:focus-visible { outline: none; }
+.template-field-input button { border: 0; padding: 0 10px; background: transparent; color: var(--app-muted); }
+.template-field-select > small { display: block; font-size: 12px; margin-top: 5px; }
+.template-field-missing-text { color: #b42318; font-size: 13px; }
+.template-field-options { position: absolute; z-index: 10; width: 100%; min-width: 200px; max-height: 260px; overflow-y: auto; top: 46px; left: 0; background: white; border: 1px solid var(--app-line); border-radius: 6px; box-shadow: 0 7px 18px #15234120; padding: 4px; }
+.template-field-group-label { color: var(--app-muted); padding: 7px 9px; font-size: 11px; font-weight: 600; }
+.template-field-option { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 8px 9px; border-radius: 3px; cursor: pointer; }
+.template-field-option > span { display: grid; gap: 2px; min-width: 0; }
+.template-field-option strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.template-field-option small { font-size: 11px; color: var(--app-muted); }
+.template-field-option.is-active { outline: 1px solid var(--app-blue); outline-offset: -1px; background: #edf3ff; }
+.template-field-option.has-missing, .template-field-input.has-missing { background: #fff0f0; border-color: #f1b8b8; }
+.template-field-option.has-missing small { color: #b42318; }
+.template-field-no-results { font-size: 13px; padding: 10px; color: var(--app-muted); }
+.template-mapping-preview { border-top: 1px solid var(--app-line); padding-top: 16px; margin: 20px 0; }
+.template-mapping-preview > summary { cursor: pointer; font-weight: 600; font-size: 14px; margin-bottom: 14px; }
+.template-mapping-preview .campaign-composer { padding: 16px; border: 1px solid var(--app-line); border-radius: 6px; }
+.template-mapping-preview .campaign-rich-body { min-height: 100px; max-height: 260px; }
+.app-ui .template-mapping-preview .campaign-rich-body .ProseMirror { min-height: 100px; }
+@media (max-width: 560px) {
+  .template-editor-page .campaign-composer { padding: 14px; }
+  .template-mapping-row { grid-template-columns: minmax(70px, .65fr) 16px minmax(0, 1fr); gap: 8px; }
+  .template-mapping-row > code { font-size: 11px; }
+  .template-field-options { min-width: 0; }
+  .template-field-input input { font-size: 16px; padding-left: 8px; }
+}

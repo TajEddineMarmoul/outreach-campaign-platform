@@ -7,7 +7,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from src.template_engine import contact_context, missing_template_variables
-from .models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, Sender, SendJob, SendLog
+from .models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, Sender, SenderGroup, SenderGroupMembership, SendJob, SendLog
 from .services import WEEKDAY_NAMES, _aware_utc, campaign_zone, day_bounds_for_zone, user_zone
 from .time import utcnow
 
@@ -23,6 +23,50 @@ def _share_capacity(demand: dict[int, int], capacity: int) -> dict[int, int]:
             allocation[key] += grant
             capacity -= grant
         pending = [key for key in pending if allocation[key] < demand[key]]
+    return allocation
+
+
+def _share_sender_capacity(demand: dict[int, int], choices: dict[int, set[int]], capacity: dict[int, int]) -> dict[int, int]:
+    """Share each canonical account once, even when sender groups overlap."""
+    allocation = dict.fromkeys(demand, 0)
+    free = dict(capacity)
+    assigned: dict[int, Counter] = defaultdict(Counter)
+    pending = [key for key in sorted(demand) if demand[key] > 0]
+    contention = Counter(sender_id for key in pending for sender_id in choices.get(key, set()))
+
+    def assign(key: int, visited: set[int]) -> bool:
+        candidates = sorted(choices.get(key, set()), key=lambda item: (
+            free.get(item, 0) <= 0,
+            contention[item],
+            -free.get(item, 0), item,
+        ))
+        for sender_id in candidates:
+            if sender_id in visited or sender_id not in free:
+                continue
+            visited.add(sender_id)
+            if free[sender_id] > 0:
+                free[sender_id] -= 1
+                assigned[sender_id][key] += 1
+                return True
+            # Move an earlier allocation to an alternate account when needed.
+            # Its campaign keeps its share, and overlapping groups can still
+            # use all available capacity instead of stranding a scarce account.
+            for owner, amount in list(assigned[sender_id].items()):
+                if amount > 0 and assign(owner, visited):
+                    assigned[sender_id][owner] -= 1
+                    assigned[sender_id][key] += 1
+                    return True
+        return False
+
+    while pending:
+        progressed = False
+        for key in pending:
+            if assign(key, set()):
+                allocation[key] += 1
+                progressed = True
+        pending = [key for key in pending if allocation[key] < demand[key]]
+        if not progressed:
+            break
     return allocation
 
 
@@ -48,7 +92,16 @@ def daily_campaign_capacity(session: Session, user_id: str, *, now: datetime | N
     connected = {sender.id: sender for sender in senders if sender.status == "connected" and sender.encrypted_oauth_credentials}
     groups: dict[int, list[Sender]] = defaultdict(list)
     for sender in connected.values():
-        groups[sender.group_id].append(sender)
+        if sender.group_id is not None:
+            groups[sender.group_id].append(sender)
+    for group_id, sender_id in session.execute(
+        select(SenderGroupMembership.group_id, SenderGroupMembership.sender_id)
+        .join(SenderGroup, SenderGroup.id == SenderGroupMembership.group_id)
+        .where(SenderGroup.user_id == user_id)
+    ):
+        sender = connected.get(sender_id)
+        if sender and sender not in groups[group_id]:
+            groups[group_id].append(sender)
 
     actual = Counter()
     campaign_usage = Counter()
@@ -168,12 +221,11 @@ def daily_campaign_capacity(session: Session, user_id: str, *, now: datetime | N
         if ((job.campaign_id, job.recipient_id) in valid_recipients
                 and reserved[job.campaign_id] < demand[job.campaign_id]):
             reserved[job.campaign_id] += 1
-    for group_id, members in groups.items():
-        group_demand = {campaign.id: max(0, demand[campaign.id] - reserved[campaign.id])
-                        for campaign in campaigns if campaign.selected_sender_group_id == group_id}
-        allocation = _share_capacity(group_demand, sum(free[sender.id] for sender in members))
-        competitors = sum(demand[campaign_id] > 0 for campaign_id in group_demand)
-        for campaign_id, grant in allocation.items():
-            items[campaign_id]["estimated_total_today"] += reserved[campaign_id] + grant
-            items[campaign_id]["competing_campaigns"] = max(0, competitors - int(demand[campaign_id] > 0))
+    choices = {campaign.id: {sender.id for sender in groups.get(campaign.selected_sender_group_id, [])} for campaign in campaigns}
+    allocation = _share_sender_capacity({key: max(0, value - reserved[key]) for key, value in demand.items()}, choices, free)
+    for campaign_id, grant in allocation.items():
+        items[campaign_id]["estimated_total_today"] += reserved[campaign_id] + grant
+        items[campaign_id]["competing_campaigns"] = sum(
+            other != campaign_id and demand[other] > 0 and bool(choices[campaign_id] & choices[other]) for other in demand
+        )
     return {"items": list(items.values()), "as_of": current.isoformat(), "account_timezone": account_zone.key}

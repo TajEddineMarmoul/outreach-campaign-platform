@@ -55,6 +55,7 @@ class SenderGroup(Base, TimestampMixin):
 
     user: Mapped[User] = relationship(back_populates="sender_groups")
     senders: Mapped[list[Sender]] = relationship(back_populates="group")
+    members: Mapped[list[Sender]] = relationship(secondary="sender_group_memberships", back_populates="groups")
     campaigns: Mapped[list[Campaign]] = relationship(back_populates="selected_sender_group")
 
 
@@ -70,7 +71,8 @@ class Sender(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    group_id: Mapped[int] = mapped_column(ForeignKey("sender_groups.id", ondelete="RESTRICT"), index=True, nullable=False)
+    # Retained as the original group for compatibility with existing records.
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("sender_groups.id", ondelete="RESTRICT"), index=True, nullable=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     daily_cap: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
@@ -96,7 +98,15 @@ class Sender(Base, TimestampMixin):
     gmail_sync_error: Mapped[str | None] = mapped_column(Text)
 
     user: Mapped[User] = relationship(back_populates="senders")
-    group: Mapped[SenderGroup] = relationship(back_populates="senders")
+    group: Mapped[SenderGroup | None] = relationship(back_populates="senders")
+    groups: Mapped[list[SenderGroup]] = relationship(secondary="sender_group_memberships", back_populates="members")
+
+
+class SenderGroupMembership(Base):
+    __tablename__ = "sender_group_memberships"
+
+    group_id: Mapped[int] = mapped_column(ForeignKey("sender_groups.id", ondelete="CASCADE"), primary_key=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("senders.id", ondelete="CASCADE"), primary_key=True, index=True)
 
 
 class Campaign(Base, TimestampMixin):
@@ -321,6 +331,7 @@ class OAuthState(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     group_id: Mapped[int] = mapped_column(ForeignKey("sender_groups.id", ondelete="CASCADE"), index=True, nullable=False)
     code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    return_path: Mapped[str | None] = mapped_column(String(2048))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

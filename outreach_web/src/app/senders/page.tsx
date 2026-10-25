@@ -1,575 +1,163 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
-import useSWR from "swr";
+import useSWR, { mutate as mutateCache } from "swr";
 import { useSearchParams } from "next/navigation";
-import {
-  CircleAlert,
-  LoaderCircle,
-  Plus,
-  RadioTower,
-  Unplug,
-} from "lucide-react";
+import { ChevronDown, Folder, Plus } from "lucide-react";
 import { checkResponse, errorMessage, useApiClient } from "@/lib/api";
 import { trackEventOnce } from "@/lib/analytics";
 import type { Sender, SenderGroup } from "@/types/senders";
-import {
-  ActionMenu,
-  AppDialog,
-  ConfirmDialog,
-  MenuAction,
-  Notice,
-  PageHeading,
-  PageState,
-  Pager,
-  StatusBadge,
-} from "@/components/app-ui";
-
-function GmailTrackingState({ sender }: { sender: Sender }) {
-  if (sender.gmail_tracking_enabled) {
-    return (
-      <span className="sender-tracking-state is-active">
-        <RadioTower size={14} aria-hidden="true" />
-        Live reply tracking on
-      </span>
-    );
-  }
-  if (!sender.gmail_tracking_permission) {
-    return (
-      <span className="sender-tracking-state is-warning">
-        <Unplug size={14} aria-hidden="true" />
-        Reconnect Gmail to track replies
-      </span>
-    );
-  }
-  if (sender.gmail_tracking_status === "error") {
-    return (
-      <span
-        className="sender-tracking-state is-error"
-        title={sender.gmail_sync_error || undefined}
-      >
-        <CircleAlert size={14} aria-hidden="true" />
-        Gmail tracking needs attention
-      </span>
-    );
-  }
-  return (
-    <span className="sender-tracking-state is-pending">
-      <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
-      Setting up live tracking
-    </span>
-  );
-}
+import { ActionMenu, AppDialog, ConfirmDialog, MenuAction, Notice, PageHeading, PageState, SearchField } from "@/components/app-ui";
+import AddSenderDialog from "@/components/senders/AddSenderDialog";
+import SenderAccountsTable from "@/components/senders/SenderAccountsTable";
 
 function SendersContent() {
   const { API_URL, authFetch } = useApiClient();
-  const {
-    data: groups = [],
-    error,
-    isLoading,
-    mutate,
-  } = useSWR<SenderGroup[]>(`${API_URL}/api/sender-groups`);
+  const { data: groups = [], error, isLoading, mutate: refreshGroups } = useSWR<SenderGroup[]>(`${API_URL}/api/sender-groups`);
+  const { data: saved = [], error: savedError, isLoading: savedLoading, mutate: refreshSaved } = useSWR<Sender[]>(`${API_URL}/api/senders`);
   const params = useSearchParams();
-  const [groupId, setGroupId] = useState<number | null>(null);
-  const group = groups.find((item) => item.id === groupId) || groups[0];
-  const [page, setPage] = useState(1);
-  const [groupDialog, setGroupDialog] = useState<
-    "create" | "rename" | "connect" | null
-  >(null);
+  const [expanded, setExpanded] = useState<number[]>(() => params.get("group_id") ? [Number(params.get("group_id"))] : []);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [groupDialog, setGroupDialog] = useState<{ group?: SenderGroup } | null>(null);
   const [groupName, setGroupName] = useState("");
+  const [adding, setAdding] = useState<{ group: SenderGroup; mode: "saved" | "new" } | null>(null);
   const [editing, setEditing] = useState<Sender | null>(null);
-  const [removing, setRemoving] = useState<Sender | "group" | null>(null);
+  const [attaching, setAttaching] = useState<Sender | null>(null);
+  const [targetGroup, setTargetGroup] = useState("");
+  const [removing, setRemoving] = useState<{ group: SenderGroup } | { sender: Sender } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState("");
+  const [problem, setProblem] = useState("");
   const [message, setMessage] = useState("");
   useEffect(() => {
-    if (params.get("oauth")) {
-      if (params.get("oauth") === "success") {
-        const senderId = params.get("sender_id") || "connected";
-        trackEventOnce(
-          `sender:${senderId}:connected`,
-          "sender_connected",
-          { connection_method: "gmail_oauth" },
-        );
-      }
+    if (params.get("oauth") === "success") {
+      trackEventOnce(`sender:${params.get("sender_id") || "connected"}:connected`, "sender_connected", { connection_method: "gmail_oauth" });
       window.sessionStorage.removeItem("pending_sender_group_id");
-      void mutate();
     }
-  }, [params, mutate]);
-  const connect = async (id: number) => {
-    setBusy(true);
-    setActionError("");
-    try {
-      const result = await checkResponse<{ auth_url?: string }>(
-        await authFetch(
-          `${API_URL}/api/sender-groups/${id}/senders/oauth/start`,
-          { method: "POST" },
-        ),
-      );
-      if (!result.auth_url)
-        throw new Error("Could not start the connection. Please try again.");
-      window.sessionStorage.setItem("pending_sender_group_id", String(id));
-      window.location.assign(result.auth_url);
-    } catch (error) {
-      setActionError(errorMessage(error));
-      setBusy(false);
-    }
+  }, [params]);
+  const request = async <T = Record<string, unknown>,>(path: string, method: string, body?: object) => checkResponse<T>(
+    await authFetch(`${API_URL}${path}`, { method, ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) }),
+  );
+  const refresh = async () => {
+    await Promise.all([refreshGroups(), refreshSaved(), mutateCache((key) => typeof key === "string" && (key.includes("/daily-capacity") || key.includes("/send-progress") || key.endsWith("/summary")))]);
   };
-  const request = async <T = Record<string, unknown>>(
-    path: string,
-    method: string,
-    body?: object,
-  ) => {
-    return checkResponse<T>(
-      await authFetch(`${API_URL}${path}`, {
-        method,
-        ...(body
-          ? {
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            }
-          : {}),
-      }),
-    );
+  const perform = async (action: () => Promise<unknown>, success: string) => {
+    if (busy) return;
+    setBusy(true); setProblem(""); setMessage("");
+    try { await action(); await refresh(); setMessage(success); }
+    catch (error) { setProblem(errorMessage(error)); }
+    finally { setBusy(false); }
   };
+  const beginGroup = (group?: SenderGroup) => { setGroupName(group?.name || ""); setGroupDialog({ group }); setProblem(""); };
   const saveGroup = async (event: React.FormEvent) => {
     event.preventDefault();
-    setBusy(true);
-    setActionError("");
-    try {
-      const result = await request<{ id: number }>(
-        `/api/sender-groups${groupDialog === "rename" ? `/${group.id}` : ""}`,
-        groupDialog === "rename" ? "PATCH" : "POST",
-        { name: groupName.trim() },
-      );
-      setGroupId(result.id);
-      await mutate();
-      const startConnection = groupDialog === "connect";
+    await perform(async () => {
+      const group = groupDialog?.group;
+      const result = await request<SenderGroup>(`/api/sender-groups${group ? `/${group.id}` : ""}`, group ? "PATCH" : "POST", { name: groupName.trim() });
       setGroupDialog(null);
-      setGroupName("");
-      if (startConnection) {
-        await connect(result.id);
-        return;
-      }
-      setMessage("Group saved.");
-    } catch (error) {
-      setActionError(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
+      if (!expanded.includes(result.id)) setExpanded([...expanded, result.id]);
+      if (!group) setAdding({ group: result, mode: "saved" });
+    }, "Group saved.");
   };
-  const saveSender = async (event: React.FormEvent) => {
+  const saveAccount = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!editing) return;
-    setBusy(true);
-    setActionError("");
-    try {
-      await request(`/api/senders/${editing.id}`, "PATCH", {
-        display_name: editing.display_name,
-        daily_cap: editing.daily_cap,
-        group_id: editing.group_id,
-      });
-      await mutate();
-      setEditing(null);
-      setMessage("Sender updated.");
-    } catch (error) {
-      setActionError(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
+    await perform(async () => { await request(`/api/senders/${editing.id}`, "PATCH", { display_name: editing.display_name, daily_cap: editing.daily_cap }); setEditing(null); }, "Saved account updated.");
   };
-  const setDefault = async (id: number) => {
-    setBusy(true);
-    setActionError("");
-    try {
-      await request(`/api/senders/${id}/default`, "PATCH");
-      await mutate();
-      setMessage("Default sender updated.");
-    } catch (error) {
-      setActionError(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
+  const attach = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!attaching || !targetGroup) return;
+    await perform(async () => { await request(`/api/sender-groups/${targetGroup}/senders`, "POST", { sender_ids: [attaching.id] }); setExpanded([...new Set([...expanded, Number(targetGroup)])]); setAttaching(null); }, "Account added. Your existing Gmail connection is shared.");
   };
   const remove = async () => {
     if (!removing) return;
-    setBusy(true);
-    setActionError("");
-    try {
-      await request(
-        removing === "group"
-          ? `/api/sender-groups/${group.id}`
-          : `/api/senders/${removing.id}`,
-        "DELETE",
-      );
-      await mutate();
-      setRemoving(null);
-      setMessage("Removed successfully.");
-    } catch (error) {
-      setActionError(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
+    await perform(async () => { await request("group" in removing ? `/api/sender-groups/${removing.group.id}` : `/api/senders/${removing.sender.id}`, "DELETE"); setRemoving(null); }, "group" in removing ? "Group deleted. Its Gmail accounts are still saved." : "Account disconnected from all groups.");
   };
-  const beginGroup = (mode: "create" | "rename" | "connect") => {
-    setGroupDialog(mode);
-    setGroupName(mode === "rename" ? group.name : "");
-    setActionError("");
+  const addToAnother = (sender: Sender) => { setAttaching(sender); setTargetGroup(""); setProblem(""); };
+  const reconnect = (sender: Sender, group?: SenderGroup) => {
+    const target = group || groups.find((item) => item.senders.some((member) => member.id === sender.id));
+    if (target) setAdding({ group: target, mode: "new" });
+    else { addToAnother(sender); setMessage("Add this saved account to a group to reconnect Gmail."); }
   };
-  const senders = group?.senders || [];
-  const currentPage = Math.min(
-    page,
-    Math.max(1, Math.ceil(senders.length / 6)),
-  );
+  const tableProps = {
+    busy, onEdit: (sender: Sender) => { setEditing({ ...sender }); setProblem(""); },
+    onDefault: (sender: Sender) => void perform(() => request(`/api/senders/${sender.id}/default`, "PATCH"), "Default account updated."),
+    onAddToGroup: addToAnother,
+  };
+  const query = search.trim().toLowerCase();
+  const filtered = groups.filter((group) => !query || group.name.toLowerCase().includes(query) || group.senders.some((sender) => `${sender.email} ${sender.display_name}`.toLowerCase().includes(query)));
+  const modalOpen = Boolean(groupDialog || editing || attaching || removing || adding);
+  const attachChoices = groups.filter((group) => !group.senders.some((sender) => sender.id === attaching?.id));
   return (
-    <div className="app-page">
-      <PageHeading
-        title="Senders"
-        description="Email accounts used to send your campaigns."
-        actions={
-          <button
-            className="app-button is-primary"
-            disabled={busy || isLoading || !!error}
-            onClick={() =>
-              group ? void connect(group.id) : beginGroup("connect")
-            }
-          >
-            <Plus size={18} />
-            {busy && !groupDialog && !editing && !removing
-              ? "Please wait…"
-              : "Connect account"}
-          </button>
-        }
-      />
-      {!groupDialog && !editing && !removing && (
-        <Notice
-          error={
-            actionError ||
-            (params.get("oauth") === "error"
-              ? "The account could not be connected. Please try again."
-              : "")
-          }
-          message={
-            message ||
-            (params.get("oauth") === "success" ? "Account connected." : "")
-          }
-        />
-      )}
-      {group && (
-        <div className="app-toolbar">
-          <select
-            aria-label="Sender group"
-            className="app-select"
-            value={group.id}
-            onChange={(event) => {
-              setGroupId(Number(event.target.value));
-              setPage(1);
-            }}
-          >
-            {groups.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-          <ActionMenu iconOnly label="Group actions" disabled={busy}>
-            <MenuAction onClick={() => beginGroup("create")}>
-              New group
-            </MenuAction>
-            <MenuAction onClick={() => beginGroup("rename")}>
-              Rename group
-            </MenuAction>
-            <MenuAction
-              danger
-              disabled={!!senders.length}
-              onClick={() => {
-                setRemoving("group");
-                setActionError("");
-              }}
-            >
-              Delete empty group
-            </MenuAction>
-          </ActionMenu>
-          <span className="app-count">
-            {group.connected_sender_count} connected{" "}
-            {group.connected_sender_count === 1 ? "account" : "accounts"}
-          </span>
-        </div>
-      )}
-      <div className="app-table-wrap">
-        <PageState
-          loading={isLoading}
-          error={error}
-          empty={!senders.length}
-          retry={() => void mutate()}
-        >
-          <h2>
-            {group ? "No accounts in this group" : "Connect your first account"}
-          </h2>
-          <p>
-            {group
-              ? "Connect a Gmail account to send from this group."
-              : "Choose a group name, then connect your Gmail account."}
-          </p>
-        </PageState>
-        {!isLoading && !error && senders.length > 0 && (
-          <table className="app-table">
-            <thead>
-              <tr>
-                <th scope="col">Account</th>
-                <th scope="col">Status</th>
-                <th scope="col">Daily limit</th>
-                <th scope="col">Sent today</th>
-                <th scope="col">
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {senders
-                .slice((currentPage - 1) * 6, currentPage * 6)
-                .map((sender) => (
-                  <tr key={sender.id}>
-                    <td>
-                      <span className="app-name" style={{ cursor: "default" }}>
-                        <span className="app-avatar" aria-hidden="true">
-                          {(sender.display_name || sender.email)
-                            .slice(0, 2)
-                            .toUpperCase()}
-                        </span>
-                        <span>
-                          {sender.display_name || sender.email}
-                          {sender.is_default ? (
-                            <span className="app-status ml-2">Default</span>
-                          ) : null}
-                          {sender.display_name && (
-                            <span className="app-secondary">
-                              {sender.email}
-                            </span>
-                          )}
-                        </span>
-                      </span>
-                    </td>
-                    <td>
-                      <StatusBadge status={sender.status} />
-                      <GmailTrackingState sender={sender} />
-                    </td>
-                    <td>{sender.daily_cap} / day</td>
-                    <td>
-                      {sender.sent_today} / {sender.daily_cap}
-                      <span className="app-progress" aria-hidden="true">
-                        <span
-                          style={{
-                            width: `${Math.min(100, (sender.sent_today / sender.daily_cap) * 100)}%`,
-                          }}
-                        />
-                      </span>
-                    </td>
-                    <td>
-                      <ActionMenu
-                        iconOnly
-                        label={`Actions for ${sender.email}`}
-                        disabled={busy}
-                      >
-                        <MenuAction
-                          onClick={() => {
-                            setEditing({ ...sender });
-                            setActionError("");
-                          }}
-                        >
-                          Edit account
-                        </MenuAction>
-                        <MenuAction
-                          disabled={sender.is_default}
-                          onClick={() => void setDefault(sender.id)}
-                        >
-                          Set as default
-                        </MenuAction>
-                        <MenuAction
-                          onClick={() => void connect(sender.group_id)}
-                        >
-                          Reconnect account
-                        </MenuAction>
-                        <MenuAction
-                          danger
-                          onClick={() => {
-                            setRemoving(sender);
-                            setActionError("");
-                          }}
-                        >
-                          Remove account
-                        </MenuAction>
-                      </ActionMenu>
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        )}
+    <div className="app-page sender-groups-page">
+      <PageHeading title="Senders" description="Organize your saved Gmail accounts into campaign groups." actions={<>
+        <button className="app-button" aria-expanded={libraryOpen} aria-controls="saved-sender-accounts" onClick={() => setLibraryOpen(!libraryOpen)}>Saved accounts ({saved.length})</button>
+        <button className="app-button is-primary" disabled={busy || isLoading || Boolean(error)} onClick={() => beginGroup()}><Plus size={18} />New group</button>
+      </>} />
+      {!modalOpen && <Notice error={problem || (params.get("oauth") === "error" ? "Gmail could not be connected. Please try again." : "")}
+        message={message || (params.get("oauth") === "success" ? "Gmail connected. Your other groups are preserved." : "")} />}
+      <div className="app-toolbar"><SearchField label="Search groups or accounts" value={search} onChange={setSearch} /><span className="app-count">{groups.length} {groups.length === 1 ? "group" : "groups"} · {saved.length} saved {saved.length === 1 ? "account" : "accounts"}</span></div>
+      <PageState loading={isLoading} error={error} empty={!filtered.length} retry={() => void refreshGroups()}>
+        <h2>{groups.length ? "No matching groups" : "Create your first sender group"}</h2><p>{groups.length ? "Try another group name or email address." : "Add a saved Gmail account or connect a new one inside your group."}</p>
+        {!groups.length && <button className="app-button" onClick={() => beginGroup()}>Create group</button>}
+      </PageState>
+      <div className="sender-group-list">
+        {filtered.map((group) => {
+          const open = expanded.includes(group.id);
+          return <section className="sender-group-card" key={group.id} aria-label={group.name}>
+            <header className="sender-group-header">
+              <button className="sender-group-toggle" aria-expanded={open} aria-controls={`sender-group-${group.id}`} onClick={() => setExpanded(open ? expanded.filter((id) => id !== group.id) : [...expanded, group.id])}>
+                <ChevronDown size={18} className={open ? "is-open" : ""} aria-hidden="true" /><Folder size={20} aria-hidden="true" />
+                <span><strong>{group.name}</strong><small>{group.senders.length} {group.senders.length === 1 ? "account" : "accounts"} · {group.connected_sender_count} connected</small></span>
+              </button>
+              <div className="sender-group-actions">
+                <button className="app-button" disabled={busy} onClick={() => { setAdding({ group, mode: "saved" }); setProblem(""); }} aria-label={`Add sender to ${group.name}`}><Plus size={16} />Add sender</button>
+                <ActionMenu iconOnly label={`Actions for ${group.name}`} disabled={busy}>
+                  <MenuAction onClick={() => beginGroup(group)}>Rename group</MenuAction>
+                  <MenuAction danger onClick={() => { setRemoving({ group }); setProblem(""); }}>Delete group</MenuAction>
+                </ActionMenu>
+              </div>
+            </header>
+            {open && <div id={`sender-group-${group.id}`} className="sender-group-body">
+              {group.senders.length ? <SenderAccountsTable {...tableProps} senders={group.senders} inGroup onReconnect={(sender) => reconnect(sender, group)}
+                onRemove={(sender) => void perform(() => request(`/api/sender-groups/${group.id}/senders/${sender.id}`, "DELETE"), `Removed ${sender.email} from ${group.name}. The Gmail connection is still saved.`)} />
+                : <div className="sender-group-empty"><p>No accounts in this group yet.</p><button className="app-button" onClick={() => setAdding({ group, mode: "saved" })}>Add an account</button></div>}
+            </div>}
+          </section>;
+        })}
       </div>
-      {senders.length > 6 && (
-        <Pager
-          page={currentPage}
-          pageSize={6}
-          total={senders.length}
-          onChange={setPage}
-        />
-      )}
-      <p className="app-footnote">
-        Limits control daily sends. Connected accounts can also check Gmail for
-        replies, automated responses, and undelivered addresses.
-      </p>
-      <AppDialog
-        open={!!groupDialog}
-        onClose={() => {
-          if (!busy) setGroupDialog(null);
-        }}
-        title={
-          groupDialog === "rename" ? "Rename group" : "Create a sender group"
-        }
-        description={
-          groupDialog === "connect"
-            ? "Accounts are organized into groups. Name your first group, then continue to Google."
-            : "Campaigns use the accounts in the group you select."
-        }
-      >
-        <form className="app-form" onSubmit={saveGroup}>
-          <label className="app-field">
-            Group name
-            <input
-              autoFocus
-              required
-              maxLength={160}
-              value={groupName}
-              onChange={(event) => setGroupName(event.target.value)}
-              placeholder="e.g. Hiring team"
-            />
-          </label>
-          <Notice error={actionError} />
-          <div className="app-dialog-actions">
-            <button
-              type="button"
-              className="app-button"
-              disabled={busy}
-              onClick={() => setGroupDialog(null)}
-            >
-              Cancel
-            </button>
-            <button
-              className="app-button is-primary"
-              disabled={busy || !groupName.trim()}
-            >
-              {busy
-                ? "Please wait…"
-                : groupDialog === "connect"
-                  ? "Continue to Google"
-                  : "Save group"}
-            </button>
-          </div>
+      <p className="app-footnote">One Gmail account can belong to several groups. Its connection, daily limit, and sent count are shared across those groups.</p>
+      {libraryOpen && <section id="saved-sender-accounts" className="sender-library" aria-label="Saved Gmail accounts">
+        <h2>Saved accounts</h2><p className="app-muted">Manage each Gmail connection here, including accounts that are not in a group.</p>
+        <PageState loading={savedLoading} error={savedError} empty={!saved.length} retry={() => void refreshSaved()}><p>Connect a Gmail account from any group to save it here.</p></PageState>
+        {saved.length > 0 && <SenderAccountsTable {...tableProps} senders={saved} onReconnect={(sender) => reconnect(sender)} onRemove={(sender) => { setRemoving({ sender }); setProblem(""); }} />}
+      </section>}
+      {adding && <AddSenderDialog key={`${adding.group.id}-${adding.mode}`} group={adding.group} initialMode={adding.mode} onClose={() => setAdding(null)} onAdded={async () => { await refresh(); setExpanded([...new Set([...expanded, adding.group.id])]); setMessage("Saved accounts added. Their other groups stay connected."); }} />}
+      <AppDialog open={Boolean(groupDialog)} onClose={() => { if (!busy) setGroupDialog(null); }} title={groupDialog?.group ? "Rename group" : "Create a sender group"} description="Campaigns send through the accounts in the group you choose.">
+        <form className="app-form" onSubmit={saveGroup}><label className="app-field">Group name<input autoFocus required maxLength={160} value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="e.g. Hiring team" /></label><Notice error={problem} /><div className="app-dialog-actions"><button type="button" className="app-button" disabled={busy} onClick={() => setGroupDialog(null)}>Cancel</button><button className="app-button is-primary" disabled={busy || !groupName.trim()}>{busy ? "Saving…" : "Save group"}</button></div></form>
+      </AppDialog>
+      <AppDialog open={Boolean(editing)} onClose={() => { if (!busy) setEditing(null); }} title="Edit saved account" description={editing?.email}>
+        {editing && <form className="app-form" onSubmit={saveAccount}>
+          <label className="app-field">Display name<input maxLength={200} value={editing.display_name} onChange={(event) => setEditing({ ...editing, display_name: event.target.value })} /></label>
+          <label className="app-field">Account daily limit<input type="number" min="1" max="500" required value={editing.daily_cap} onChange={(event) => setEditing({ ...editing, daily_cap: Number(event.target.value) })} /></label>
+          <p className="app-muted sender-dialog-copy">The name and account limit apply in all {editing.group_ids?.length ?? (editing.group_id ? 1 : 0)} of its groups. Your Gmail connection stays signed in.</p>
+          <Notice error={problem} /><div className="app-dialog-actions"><button type="button" className="app-button" disabled={busy} onClick={() => setEditing(null)}>Cancel</button><button className="app-button is-primary" disabled={busy}>{busy ? "Saving…" : "Save account"}</button></div>
+        </form>}
+      </AppDialog>
+      <AppDialog open={Boolean(attaching)} onClose={() => { if (!busy) setAttaching(null); }} title="Add saved account to a group" description={attaching?.email}>
+        <form className="app-form" onSubmit={attach}>
+          {attachChoices.length ? <label className="app-field">Group<select value={targetGroup} required onChange={(event) => setTargetGroup(event.target.value)}><option value="">Choose a group</option>{attachChoices.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label> : <p>This account is already in all your groups. Create another group to use it there.</p>}
+          <p className="app-muted sender-dialog-copy">Reuses your saved connection and keeps all existing memberships.</p><Notice error={problem} />
+          <div className="app-dialog-actions"><button type="button" className="app-button" disabled={busy} onClick={() => setAttaching(null)}>Cancel</button><button className="app-button is-primary" disabled={busy || !targetGroup}>{busy ? "Adding…" : "Add to group"}</button></div>
         </form>
       </AppDialog>
-      <AppDialog
-        open={!!editing}
-        onClose={() => {
-          if (!busy) setEditing(null);
-        }}
-        title="Edit sender"
-        description={editing?.email}
-      >
-        {editing && (
-          <form className="app-form" onSubmit={saveSender}>
-            <label className="app-field">
-              Display name
-              <input
-                maxLength={200}
-                value={editing.display_name}
-                onChange={(event) =>
-                  setEditing({ ...editing, display_name: event.target.value })
-                }
-              />
-            </label>
-            <label className="app-field">
-              Daily limit
-              <input
-                type="number"
-                min={1}
-                max={500}
-                required
-                value={editing.daily_cap}
-                onChange={(event) =>
-                  setEditing({
-                    ...editing,
-                    daily_cap: Number(event.target.value),
-                  })
-                }
-              />
-            </label>
-            <label className="app-field">
-              Group
-              <select
-                className="app-select"
-                value={editing.group_id}
-                onChange={(event) =>
-                  setEditing({
-                    ...editing,
-                    group_id: Number(event.target.value),
-                  })
-                }
-              >
-                {groups.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {editing.last_error && (
-              <p className="app-muted">
-                Last connection error: {editing.last_error}
-              </p>
-            )}
-            <Notice error={actionError} />
-            <div className="app-dialog-actions">
-              <button
-                type="button"
-                className="app-button"
-                disabled={busy}
-                onClick={() => setEditing(null)}
-              >
-                Cancel
-              </button>
-              <button className="app-button is-primary" disabled={busy}>
-                {busy ? "Saving…" : "Save changes"}
-              </button>
-            </div>
-          </form>
-        )}
-      </AppDialog>
-      <ConfirmDialog
-        open={!!removing}
-        title={
-          removing === "group"
-            ? "Delete this empty group?"
-            : "Remove this account?"
-        }
-        description={
-          removing === "group"
-            ? "The empty group will be deleted. Campaigns keep their messages and history."
-            : "This account will stop being available for sending. You can reconnect it later."
-        }
-        busy={busy}
-        error={actionError}
-        onClose={() => setRemoving(null)}
-        onConfirm={() => void remove()}
-      />
+      <ConfirmDialog open={Boolean(removing)} onClose={() => { if (!busy) setRemoving(null); }} busy={busy} error={problem} onConfirm={() => void remove()}
+        title={removing && "group" in removing ? `Delete ${removing.group.name}?` : "Disconnect Gmail from all groups?"}
+        description={removing && "group" in removing ? "The Gmail accounts stay saved and available in their other groups. Campaigns using this group will pause until you choose another group." : "This disconnects this Gmail account everywhere. Other Gmail accounts stay connected. You can reconnect it later."} />
     </div>
   );
 }
 
 export default function SendersPage() {
-  return (
-    <Suspense fallback={<PageState loading />}>
-      <SendersContent />
-    </Suspense>
-  );
+  return <Suspense fallback={<PageState loading />}><SendersContent /></Suspense>;
 }

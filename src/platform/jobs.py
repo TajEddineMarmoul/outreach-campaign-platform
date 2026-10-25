@@ -25,6 +25,7 @@ from src.platform.services import (
     connected_senders,
     delivery_policy_state,
     eligible_senders,
+    group_senders,
     require_group,
     sender_sent_count_today,
 )
@@ -453,6 +454,19 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
             _schedule_after_finished_batch(session, job, utcnow())
             session.commit()
             return {"status": "cancelled", "reason_code": "recipient_ineligible"}
+        try:
+            selected_group = require_group(session, campaign.user_id, campaign.selected_sender_group_id) if campaign.selected_sender_group_id else None
+        except LookupError:
+            selected_group = None
+        if selected_group is None or sender.id not in {member.id for member in group_senders(selected_group)}:
+            # A job claimed before a group edit can become queued again while
+            # paused. Reassign that work through the current group on the next
+            # scheduler cycle rather than sending from its old account.
+            recipient.status = "approved"
+            session.delete(job)
+            campaign.scheduled_at = utcnow()
+            session.commit()
+            return {"status": "deferred", "reason_code": "sender_group_changed", "job_id": None}
         if sender.status != "connected" or not sender.encrypted_oauth_credentials:
             logger.error("job %s sender not connected: status=%s has_creds=%s", job_id, sender.status, bool(sender.encrypted_oauth_credentials))
             recipient.status = "approved"
