@@ -128,7 +128,7 @@ def daily_campaign_capacity(session: Session, user_id: str, *, now: datetime | N
                 end = datetime.combine(local.date(), time.fromisoformat(settings.get("end_time", "17:00")), tzinfo=zone)
         if campaign.scheduled_at:
             start = max(start, _aware_utc(campaign.scheduled_at))
-        if end <= start:
+        if end <= start and state == "active":
             state = "window_closed"
         if campaign.status not in {"sending", "scheduled", "autopilot"}:
             state = campaign.status
@@ -136,7 +136,9 @@ def daily_campaign_capacity(session: Session, user_id: str, *, now: datetime | N
             state = "test_mode"
         elif not members:
             state = "no_senders"
-        limit = min(sender_limit, campaign_limit) if campaign_limit is not None else sender_limit
+        # Keep the account ceiling visible even on a disabled campaign day.
+        # The campaign's own cap still limits demand and the estimated total.
+        limit = sender_limit
         remaining = min(
             max(0, (campaign_limit if campaign_limit is not None else sender_limit) - campaign_usage[campaign.id]),
             max(0, limit - actual[campaign.id]),

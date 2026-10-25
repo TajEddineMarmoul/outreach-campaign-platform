@@ -102,6 +102,28 @@ def test_campaign_and_account_caps_both_bound_estimate(session):
     assert items(session)[first.id]["estimated_total_today"] == 40
 
 
+def test_campaign_cap_limits_estimate_while_account_ceiling_stays_visible(session):
+    shared, _ = group(session, cap=40)
+    value = campaign(session, shared, cap=10)
+    result = items(session)[value.id]
+    assert result["estimated_total_today"] == result["campaign_limit"] == 10
+    assert result["daily_limit"] == result["sender_limit"] == 40
+
+
+def test_disabled_day_keeps_account_limit_visible_and_projects_no_new_sends(session):
+    shared, sender = group(session, cap=40)
+    value = campaign(session, shared)
+    monday = session.scalar(select(AutopilotDaySchedule).where(
+        AutopilotDaySchedule.campaign_id == value.id, AutopilotDaySchedule.day_of_week == "monday",
+    ))
+    session.delete(monday)
+    sent(session, value, sender, 5)
+    result = items(session)[value.id]
+    assert result["sent_today"] == result["estimated_total_today"] == 5
+    assert result["daily_limit"] == 40 and result["campaign_limit"] == 0
+    assert result["state"] == "day_disabled"
+
+
 @pytest.mark.parametrize("status", ["paused", "draft", "ended", "stopped"])
 def test_inactive_campaign_does_not_compete_for_new_slots(session, status):
     shared, sender = group(session)
