@@ -51,8 +51,6 @@ import EmailComposer from "@/components/EmailComposer";
 import LoadTemplateDialog from "@/components/templates/LoadTemplateDialog";
 import SaveTemplateDialog from "@/components/templates/SaveTemplateDialog";
 import type { Editor } from "@tiptap/react";
-import ScheduleDialog from "@/components/campaigns/dialogs/ScheduleDialog";
-import AutopilotDailyLimitsDialog from "@/components/campaigns/dialogs/AutopilotDailyLimitsDialog";
 import SenderSelectionDialog from "@/components/campaigns/dialogs/SenderSelectionDialog";
 import PreviewDialog from "@/components/campaigns/dialogs/PreviewDialog";
 import RecipientsImportDialog from "@/components/campaigns/dialogs/RecipientsImportDialog";
@@ -64,7 +62,6 @@ import AttachmentDialog, {
   type CampaignAttachmentSummary,
 } from "@/components/campaigns/dialogs/AttachmentDialog";
 import LogsSection from "@/components/campaigns/LogsSection";
-import ProgressSection from "@/components/campaigns/ProgressSection";
 import RecipientsSection from "@/components/campaigns/RecipientsSection";
 import { API_URL, responseProblem, useApiClient } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
@@ -80,9 +77,7 @@ import CampaignSteps, {
   CAMPAIGN_STEPS,
   type CampaignStep,
 } from "@/components/campaigns/workspace/CampaignSteps";
-import CampaignOverview, {
-  CurrentSchedule,
-} from "@/components/campaigns/workspace/CampaignOverview";
+import CampaignOverview from "@/components/campaigns/workspace/CampaignOverview";
 import CampaignSchedule from "@/components/campaigns/workspace/CampaignSchedule";
 import CampaignReview, {
   type RecipientValidation,
@@ -137,7 +132,6 @@ function CampaignEditor() {
   const [endDialogOpen, setEndDialogOpen] = useState(false);
   const [variablesOpen, setVariablesOpen] = useState(false);
   const [messageToolsOpen, setMessageToolsOpen] = useState(false);
-  const [configurationOnly, setConfigurationOnly] = useState(false);
   const { authFetch } = useApiClient();
   const { userId } = useAuth();
   const campaignTips = useCampaignTips(userId);
@@ -216,11 +210,12 @@ function CampaignEditor() {
   );
   const isPaused = campaign?.status === "paused";
   const isAutopilotRunning = campaign?.status === "autopilot";
+  const isOperational = Boolean(campaign && campaign.status !== "draft");
   const hasActiveDeliveryControls = editingLocked || isPaused;
   const canResume =
     ["ended", "stopped"].includes(campaign?.status || "") &&
     Boolean(deliveryProgress?.resumable);
-  const schedule = useScheduleDraft(campaignId, summary, editingLocked);
+  const schedule = useScheduleDraft(campaignId, summary, editingLocked, isOperational);
   const launchingRef = useRef(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -448,14 +443,11 @@ function CampaignEditor() {
   }, []);
 
   // Modal open states
-  const [sendModalOpen, setSendModalOpen] = useState(false);
-  const [sendTab, setSendTab] = useState("send-now");
   const [senderModalOpen, setSenderModalOpen] = useState(() => searchParams.get("sender_setup") === "1");
   const [recipientsModalOpen, setRecipientsModalOpen] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [attachmentModalOpen, setAttachmentModalOpen] = useState(false);
-  const [autopilotLimitsOpen, setAutopilotLimitsOpen] = useState(false);
   const [attachmentUploads, setAttachmentUploads] = useState<
     AttachmentUpload[]
   >([]);
@@ -617,14 +609,9 @@ function CampaignEditor() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.detail || "Failed to update sender group");
       }
-      mutateSummary();
-      mutateSenderGroups();
+      await Promise.all([mutateSummary(), mutateSenderGroups(), mutate(`${API_URL}/api/campaigns/${campaignId}/send-progress`)]);
     } catch (err: unknown) {
-      alert(
-        err instanceof Error
-          ? err.message
-          : "Request failed. Please try again.",
-      );
+      throw err;
     }
   };
 
@@ -703,6 +690,8 @@ function CampaignEditor() {
     try {
       if (!editingLocked) {
         await saveCampaignChanges(activeStep === "schedule");
+      } else if (isOperational) {
+        await schedule.flush();
       }
       router.push(href);
     } catch (error) {
@@ -744,17 +733,18 @@ function CampaignEditor() {
     : summary?.recipients
       ? "message"
       : "audience";
-  const isOperational =
-    campaign?.status !== "draft" && (editingLocked || !requestedStep);
   const tab = [
     "overview",
     "audience",
     "message",
+    "senders",
     "schedule",
     "activity",
   ].includes(searchParams.get("tab") || "")
     ? searchParams.get("tab")!
-    : "overview";
+    : isOperational && ["audience", "message", "senders", "schedule"].includes(requestedStep || "")
+      ? requestedStep!
+      : "overview";
   const audienceReady = Number(summary?.recipients || 0) > 0;
   const messageReady = Boolean(
     subject.trim() &&
@@ -852,26 +842,6 @@ function CampaignEditor() {
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
   }, [activeStep, tab]);
-  const openSchedule = async (configure: boolean) => {
-    setNotice("");
-    try {
-      await flushComposerDraft();
-      await mutateSummary();
-      setConfigurationOnly(configure);
-      setSendTab(
-        summary?.send_settings?.mode === "autopilot"
-          ? "autopilot"
-          : summary?.send_settings?.mode === "schedule"
-            ? "schedule"
-            : "send-now",
-      );
-      setSendModalOpen(true);
-    } catch {
-      setNotice(
-        "Save your message before opening the schedule. Please retry saving.",
-      );
-    }
-  };
   const launchCampaign = async () => {
     if (launchingRef.current || !launchReady || !schedule.draft) return;
     launchingRef.current = true;
@@ -984,10 +954,9 @@ function CampaignEditor() {
   useEffect(() => {
     const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
       if (
-        !editingLocked &&
-        (["unsaved", "saving", "error"].includes(draftSaveStatus) ||
-          schedule.status !== "saved" ||
-          name !== campaign?.name)
+        schedule.status !== "saved" ||
+        (!editingLocked &&
+          (["unsaved", "saving", "error"].includes(draftSaveStatus) || name !== campaign?.name))
       ) {
         event.preventDefault();
         event.returnValue = "";
@@ -1017,12 +986,18 @@ function CampaignEditor() {
     );
   }
 
-  const saveLabel = isPaused
-    ? draftSaveStatus === "error" || schedule.status === "error"
+  const saveLabel = schedule.status === "unsaved"
+    ? "Unsaved changes"
+    : schedule.status === "saving"
+      ? "Saving changes…"
+      : schedule.status === "error"
+        ? "Changes not saved"
+        : isPaused
+    ? draftSaveStatus === "error"
       ? "Changes not saved"
-      : draftSaveStatus === "unsaved" || schedule.status === "unsaved"
+      : draftSaveStatus === "unsaved"
         ? "Unsaved changes"
-        : draftSaveStatus === "saving" || schedule.status === "saving" || isSaving
+        : draftSaveStatus === "saving" || isSaving
           ? "Saving changes…"
           : "Changes saved"
     : isOperational
@@ -1031,13 +1006,11 @@ function CampaignEditor() {
         : ["ended", "stopped"].includes(campaign.status)
           ? "History preserved"
           : "Live campaign"
-    : draftSaveStatus === "error" || schedule.status === "error"
+    : draftSaveStatus === "error"
       ? "Save failed"
-      : draftSaveStatus === "unsaved" || schedule.status === "unsaved"
+      : draftSaveStatus === "unsaved"
         ? "Unsaved changes"
-        : draftSaveStatus === "saving" ||
-            schedule.status === "saving" ||
-            isSaving
+        : draftSaveStatus === "saving" || isSaving
           ? "Saving…"
           : "Saved just now";
   const messagePanel = (
@@ -1264,7 +1237,7 @@ function CampaignEditor() {
       />
       {isOperational ? (
         <nav className="campaign-tabs" aria-label="Campaign sections">
-          {["overview", "audience", "message", "schedule", "activity"].map(
+          {["overview", "audience", "message", "senders", "schedule", "activity"].map(
             (value) => (
               <button
                 key={value}
@@ -1315,6 +1288,8 @@ function CampaignEditor() {
                         ? "Campaign audience"
                         : tab === "schedule"
                           ? "Campaign schedule"
+                          : tab === "senders"
+                            ? "Campaign senders"
                           : "Campaign activity"}
                 </h1>
                 <p>
@@ -1333,9 +1308,9 @@ function CampaignEditor() {
                     : isPaused
                       ? "Sending is paused. Changes save now and apply when you resume."
                     : isAutopilotRunning
-                      ? "Daily limits can be updated while Autopilot runs. Pause to change your message, audience, senders, or schedule."
+                      ? "Sending settings and sender groups can be changed while Autopilot runs. Pause to edit the message or audience."
                     : editingLocked
-                      ? "End the campaign before changing its message, audience, or schedule."
+                      ? "Change your sending pace or sender group here. Pause to edit the message or audience."
                       : "Review and manage this campaign."}
                 </p>
               </div>
@@ -1379,12 +1354,12 @@ function CampaignEditor() {
                     </button>
                   </>
                 )}
-                {!editingLocked && (
+                {tab === "overview" && (
                   <button
                     className="campaign-button is-outline"
-                    onClick={() => changeStep("message")}
+                    onClick={() => changeTab("schedule")}
                   >
-                    Edit campaign
+                    <SlidersHorizontal size={17} /> Sending settings
                   </button>
                 )}
                 {canResume && (
@@ -1405,15 +1380,18 @@ function CampaignEditor() {
               </div>
             </div>
             {tab === "overview" && (
+              <>
+              <div className="campaign-quick-settings">
+                <AtSign size={20} />
+                <div><span>Sender group</span><strong>{summary?.sender_group_name || selectedSenderGroup?.name || "No group selected"}</strong></div>
+                <span>{senderEmails.length} connected {senderEmails.length === 1 ? "sender" : "senders"}</span>
+                <button className="campaign-text-button" onClick={() => setSenderModalOpen(true)}>Change group</button>
+              </div>
               <CampaignOverview
                 campaignId={campaignId}
                 summary={summary}
                 onActivity={() => changeTab("activity")}
-                onEditDailyLimits={
-                  isAutopilotRunning
-                    ? () => setAutopilotLimitsOpen(true)
-                    : undefined
-                }
+                onEditSchedule={() => changeTab("schedule")}
                 onResume={
                   canResume
                     ? () => void handleCampaignAction("resume")
@@ -1421,6 +1399,13 @@ function CampaignEditor() {
                 }
                 resuming={busyAction === "resume"}
               />
+              </>
+            )}
+            {editingLocked && (tab === "message" || tab === "audience") && (
+              <div className="campaign-notice">
+                <span>Pause sending to edit the {tab === "message" ? "message" : "audience"}. Emails already sending may finish.</span>
+                <button disabled={Boolean(busyAction)} onClick={() => void handleCampaignAction("pause")}>Pause and edit</button>
+              </div>
             )}
             {tab === "message" && messagePanel}
             {tab === "audience" && (
@@ -1433,25 +1418,36 @@ function CampaignEditor() {
             )}
             {tab === "schedule" && (
               <div className="campaign-step-panel">
-                <CurrentSchedule summary={summary} />
-                {isAutopilotRunning && (
-                  <button
-                    className="campaign-button is-primary"
-                    onClick={() => setAutopilotLimitsOpen(true)}
-                  >
-                    <SlidersHorizontal size={17} /> Edit daily limits
+                {schedule.draft ? <CampaignSchedule
+                  draft={schedule.draft}
+                  onChange={schedule.update}
+                  recipients={Number(summary?.recipients || 0)}
+                  error={schedule.error || schedule.problem}
+                  onRetry={() => void schedule.flush(true).catch(() => undefined)}
+                  editing running={editingLocked} senderCount={senderEmails.length}
+                /> : <p className="campaign-empty">Loading sending settings…</p>}
+                <div className="campaign-settings-save">
+                  <button className="campaign-button is-primary"
+                    disabled={!schedule.draft || Boolean(schedule.problem) || schedule.status === "saving" || schedule.status === "saved"}
+                    onClick={async () => {
+                      try { await schedule.flush(); await refreshCampaign(); }
+                      catch { /* The schedule shows the save error beside the form. */ }
+                    }}>
+                    {schedule.status === "saving" ? <Loader2 size={17} className="animate-spin" /> : <CheckCircle size={17} />}
+                    {schedule.status === "saving" ? "Saving…" : "Save changes"}
                   </button>
-                )}
-                <button
-                  className="campaign-button is-outline"
-                  onClick={() => void openSchedule(true)}
-                >
-                  View schedule settings
-                </button>
-                <div className="mt-6">
-                  <ProgressSection campaignId={campaignId} />
+                  {schedule.status !== "saved" && <button className="campaign-button is-quiet" disabled={schedule.status === "saving"} onClick={schedule.reset}>Cancel changes</button>}
+                  <p role="status">{schedule.status === "saved" ? "Changes saved. " : ""}{isPaused ? "Sending stays paused until you resume." : editingLocked ? "Changes apply to future emails while sending continues." : "Saving does not restart sending."}</p>
                 </div>
               </div>
+            )}
+            {tab === "senders" && (
+              <section className="campaign-panel campaign-senders-settings">
+                <h2>{summary?.sender_group_name || selectedSenderGroup?.name || "No sender group selected"}</h2>
+                <ul className="campaign-sender-list">{senderEmails.map((email) => <li key={email}><CheckCircle size={18} className="is-blue" />{email}</li>)}</ul>
+                <button className="campaign-button is-outline" onClick={() => setSenderModalOpen(true)}><AtSign size={19} /> Change sender group</button>
+                <p>{editingLocked ? "Future emails use the new group. Emails already sending may finish from the previous group." : "Changes save immediately. Use Resume sending when you’re ready to continue."} Each account keeps its own daily limit.</p>
+              </section>
             )}
             {tab === "activity" && <LogsSection campaignId={campaignId} />}
           </>
@@ -1630,43 +1626,13 @@ function CampaignEditor() {
           3. Modals & Dialogs
           ---------------------------------------------------- */}
 
-      {/* A. Send Campaign Modal */}
-      <ScheduleDialog
-        key={sendTab}
-        isOpen={sendModalOpen}
-        onClose={() => setSendModalOpen(false)}
-        campaignId={campaignId as string}
-        defaultTab={sendTab}
-        configurationOnly={configurationOnly}
-        summary={summary}
-        readOnly={editingLocked || (isOperational && !isPaused)}
-        mutateAll={() => {
-          mutate(`${API_URL}/api/campaigns/${campaignId}`);
-          mutateSummary();
-        }}
-      />
-
-      <AutopilotDailyLimitsDialog
-        isOpen={autopilotLimitsOpen}
-        onClose={() => setAutopilotLimitsOpen(false)}
-        campaignId={campaignId}
-        schedule={summary?.autopilot_schedule || []}
-        onSaved={async () => {
-          await Promise.all([
-            mutate(`${API_URL}/api/campaigns/${campaignId}`),
-            mutate(`${API_URL}/api/campaigns/${campaignId}/send-progress`),
-            mutateSummary(),
-          ]);
-        }}
-      />
-
       {/* B. Select Sender Modal */}
       <SenderSelectionDialog
         isOpen={senderModalOpen}
         onClose={closeSenderDialog}
         senderGroups={senderGroups || []}
         returnPath={`/campaigns/${campaignId}?${new URLSearchParams({ ...(isOperational ? { tab } : { step: activeStep }), sender_setup: "1" })}`}
-        beforeConnect={async () => { if (!editingLocked) await saveCampaignChanges(activeStep === "schedule"); }}
+        beforeConnect={async () => { if (!editingLocked) await saveCampaignChanges(activeStep === "schedule"); else await schedule.flush(); }}
         selectedGroupId={
           summary?.sender_group_id || selectedSenderGroup?.id || null
         }

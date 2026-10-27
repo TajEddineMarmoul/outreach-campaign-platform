@@ -87,7 +87,7 @@ export default function SenderSelectionDialog({
   onClose: () => void;
   senderGroups?: SenderGroup[];
   selectedGroupId?: number | null;
-  onSelect: (senderGroupId: number) => void;
+  onSelect: (senderGroupId: number) => void | Promise<void>;
   returnPath?: string;
   beforeConnect?: () => Promise<void>;
 }) {
@@ -102,6 +102,19 @@ export default function SenderSelectionDialog({
   const [addingGroup, setAddingGroup] = useState(false);
   const [addingSenderGroup, setAddingSenderGroup] = useState<SenderGroup | null>(null);
   const [connectError, setConnectError] = useState("");
+  const [selectingGroup, setSelectingGroup] = useState<number | null>(null);
+
+  const selectGroup = async (groupId: number) => {
+    setSelectingGroup(groupId);
+    setConnectError("");
+    try {
+      await onSelect(groupId);
+    } catch (error) {
+      setConnectError(errorMessage(error, "Couldn’t change the sender group. Please try again."));
+    } finally {
+      setSelectingGroup(null);
+    }
+  };
 
   const request = async <T = Record<string, unknown>>(
     path: string,
@@ -292,8 +305,8 @@ export default function SenderSelectionDialog({
                     </div>
 
                     <div className="flex items-center gap-2">
-                    <Button size="sm" variant={isSelectedGroup ? "default" : "outline"} onClick={() => onSelect(group.id)} className="h-7 text-[10px] px-2">
-                      {isSelectedGroup ? "Selected" : "Use group"}
+                    <Button size="sm" variant={isSelectedGroup ? "default" : "outline"} disabled={selectingGroup !== null} onClick={() => void selectGroup(group.id)} className="h-7 text-[10px] px-2">
+                      {selectingGroup === group.id ? "Saving…" : isSelectedGroup ? "Selected" : "Use group"}
                     </Button>
                     <Button
                       size="sm"

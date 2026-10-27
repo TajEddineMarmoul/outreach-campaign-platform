@@ -42,7 +42,7 @@ def group(session, cap=40, name="Shared", user=USER):
 def campaign(session, selected, count=40, cap=40, status="autopilot", zone="UTC", user=USER, fields=None):
     value = Campaign(user_id=user, selected_sender_group_id=selected.id, name="Daily capacity", status=status,
                      timezone=zone, subject_template="Hi {{first_name}}", body_template="Hello",
-                     send_settings={"mode": "autopilot", "pacing_mode": "spread_evenly"})
+                     send_settings={"mode": "autopilot", "pacing_mode": "fixed_delay", "delay_minutes": 0})
     session.add(value)
     session.flush()
     for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"):
@@ -101,6 +101,18 @@ def test_campaign_and_account_caps_both_bound_estimate(session):
     sender.daily_cap = 100
     session.commit()
     assert items(session)[first.id]["estimated_total_today"] == 40
+
+
+def test_partial_day_estimate_uses_full_window_pace_after_target_increase(session):
+    shared, _ = group(session, cap=1000)
+    value = campaign(session, shared, count=100, cap=100)
+    value.send_settings = {"mode": "autopilot", "pacing_mode": "spread_evenly"}
+    for day in session.scalars(select(AutopilotDaySchedule).where(AutopilotDaySchedule.campaign_id == value.id)):
+        day.start_time, day.end_time = "09:00", "17:00"
+    now = NOW.replace(hour=16, minute=45)
+    value.scheduled_at = now + timedelta(minutes=4.8)
+    session.commit()
+    assert items(session, now=now)[value.id]["estimated_total_today"] == 3
 
 
 def test_campaign_cap_limits_estimate_while_account_ceiling_stays_visible(session):

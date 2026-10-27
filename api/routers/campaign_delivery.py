@@ -22,7 +22,7 @@ from src.platform.db import get_session
 from src.platform.jobs import create_send_jobs_for_next_batch, has_unsent_approved_recipients
 from src.platform.models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, EmailTrackingEvent, GmailActivityEvent, SendJob, SendLog, Sender
 from src.platform.scheduler import WEEKDAY_NAMES, next_autopilot_run
-from src.platform.services import autopilot_reschedule_state, campaign_daily_capacity, campaign_zone, connected_senders, ensure_user, require_group, sender_group_filter, serialize_group, user_zone, validate_timezone_name
+from src.platform.services import autopilot_reschedule_state, campaign_daily_capacity, campaign_zone, connected_senders, ensure_user, require_group, reschedule_after_campaign_edit, sender_group_filter, serialize_group, user_zone, validate_timezone_name
 from src.platform.time import utcnow
 from src.platform.worker import recover_stale_jobs, run_worker_cycle
 from src.template_engine import extract_template_variables, missing_template_variables
@@ -103,7 +103,7 @@ class SendSettingsUpdate(DeliveryRequest):
 
     @model_validator(mode="after")
     def validate_schedule(self):
-        if self.mode == "autopilot" and not self.schedule:
+        if (self.mode == "autopilot" or self.schedule is not None) and not self.schedule:
             raise ValueError("autopilot requires at least one enabled day")
         if self.schedule is not None:
             unknown = sorted(set(self.schedule) - set(WEEKDAY_NAMES))
@@ -113,7 +113,7 @@ class SendSettingsUpdate(DeliveryRequest):
 
 
 class AutopilotDailyLimitsUpdate(BaseModel):
-    """The one schedule control that is safe to change while Autopilot runs."""
+    """Compatibility endpoint for changing the enabled days' targets."""
 
     model_config = ConfigDict(extra="forbid")
     daily_limits: dict[str, int] = Field(..., min_length=1)
@@ -161,7 +161,7 @@ def require_campaign_editable(session: Session, campaign_id: int, user_id: str) 
     if campaign.status in EDIT_LOCKED_STATUSES:
         raise HTTPException(
             status_code=409,
-            detail="Stop the campaign before editing its composer, send options, or recipients",
+            detail="Pause sending before editing the message or audience.",
         )
     return campaign
 
@@ -460,12 +460,27 @@ def patch_campaign_sender_group(
         group = require_group(session, user_id, req.sender_group_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Sender group not found")
-    campaign = session.scalar(select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user_id))
-    if campaign:
-        require_campaign_editable(session, campaign_id, user_id)
-    else:
+    campaign = session.scalar(select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user_id).with_for_update())
+    if not campaign:
         campaign = ensure_campaign_shell(session, campaign_id=campaign_id, user_id=user_id)
+    if campaign.status in EDIT_LOCKED_STATUSES and not connected_senders(group):
+        raise HTTPException(status_code=422, detail="Choose a group with at least one connected sender before changing a running campaign.")
+    changed = campaign.selected_sender_group_id != group.id
     campaign.selected_sender_group_id = group.id
+    if changed:
+        # Leave sends already claimed by a worker to finish. Pending work is
+        # assigned through the new group without reopening delivered recipients.
+        sender_ids = {sender.id for sender in connected_senders(group)}
+        for job in session.scalars(select(SendJob).where(
+            SendJob.campaign_id == campaign.id, SendJob.status.in_(("queued", "retry")),
+        )):
+            if job.sender_id not in sender_ids:
+                recipient = session.get(CampaignRecipient, (campaign.id, job.recipient_id))
+                if recipient and recipient.status == "queued":
+                    recipient.status = "approved"
+                session.delete(job)
+        session.flush()
+        reschedule_after_campaign_edit(session, campaign)
     session.commit()
     return {"status": "success", "sender_group": serialize_group(session, group)}
 
@@ -477,9 +492,22 @@ def patch_send_settings(
     session: Session = Depends(get_session),
     user_id: str = Depends(get_current_user_id),
 ):
-    campaign = require_campaign_editable(session, campaign_id, user_id)
-    apply_campaign_timezone(session, campaign, req.timezone)
+    campaign = session.scalar(select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user_id).with_for_update())
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
     settings = dict(campaign.send_settings or {})
+    if campaign.status in EDIT_LOCKED_STATUSES:
+        unsafe = (
+            (req.mode is not None and req.mode != settings.get("mode"))
+            or (req.timezone is not None and req.timezone != campaign_zone(session, campaign).key)
+            or (req.dry_run is not None and req.dry_run != bool(settings.get("dry_run")))
+            or "scheduled_at" in req.model_fields_set
+            or (req.schedule is not None and settings.get("mode") != "autopilot")
+        )
+        if unsafe:
+            raise HTTPException(status_code=409, detail="Pause sending to change the delivery mode, timezone, start date, or test mode.")
+    previous_settings = dict(settings)
+    apply_campaign_timezone(session, campaign, req.timezone)
     if req.mode is not None:
         settings["mode"] = req.mode
     if req.delay_minutes is not None:
@@ -494,8 +522,15 @@ def patch_send_settings(
         else:
             scheduled_at = campaign_datetime_utc(session, campaign, req.scheduled_at)
             settings["draft_scheduled_at"] = scheduled_at.isoformat()
+        if settings.get("mode") == "schedule":
+            campaign.scheduled_at = scheduled_at if req.scheduled_at is not None else None
     campaign.send_settings = settings
+    schedule_changed = False
     if req.schedule is not None:
+        previous_schedule = {s.day_of_week: {"cap": s.daily_cap, "start": s.start_time, "end": s.end_time}
+                             for s in session.scalars(select(AutopilotDaySchedule).where(AutopilotDaySchedule.campaign_id == campaign.id))}
+        schedule_changed = previous_schedule != {day: {"cap": entry.cap, "start": entry.start, "end": entry.end} for day, entry in req.schedule.items()}
+    if schedule_changed:
         session.execute(delete(AutopilotDaySchedule).where(AutopilotDaySchedule.campaign_id == campaign.id))
         for day_name, entry in req.schedule.items():
             session.add(
@@ -507,8 +542,12 @@ def patch_send_settings(
                     end_time=entry.end,
                 )
             )
+    session.flush()
+    if schedule_changed or previous_settings != settings:
+        reschedule_after_campaign_edit(session, campaign)
     session.commit()
-    return {"status": "success", "send_settings": campaign.send_settings}
+    return {"status": "success", "send_settings": campaign.send_settings,
+            "next_batch_at": campaign.scheduled_at.isoformat() if campaign.scheduled_at else None}
 
 
 @router.patch("/api/campaigns/{campaign_id}/autopilot/daily-limits")
@@ -518,13 +557,10 @@ def patch_autopilot_daily_limits(
     session: Session = Depends(get_session),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Update Autopilot day caps without interrupting an active campaign.
-
-    Message, audience, senders, timing and mode still go through the normal
-    editable-campaign guard. Day caps are checked again at queue and delivery
-    time, so lowering one immediately prevents extra sends beyond the new cap.
-    """
-    campaign = require_campaign(session, campaign_id, user_id)
+    """Update targets at a steady full-window rate, without catch-up sending."""
+    campaign = session.scalar(select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user_id).with_for_update())
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
     settings = dict(campaign.send_settings or {})
     if campaign.status != "autopilot" or settings.get("mode") != "autopilot":
         raise HTTPException(
@@ -550,25 +586,14 @@ def patch_autopilot_daily_limits(
             ),
         )
 
+    changed = any(schedules[day].daily_cap != cap for day, cap in req.daily_limits.items())
     for day_name, daily_cap in req.daily_limits.items():
         schedules[day_name].daily_cap = daily_cap
-
-    # Re-evaluate the active day only. This wakes an Autopilot campaign that
-    # had paused at its cap after its cap increases, and pauses it immediately
-    # when a newly lower cap has already been consumed. It deliberately leaves
-    # normal pacing alone when the campaign still has capacity.
     now = utcnow()
     session.flush()
-    reschedule = autopilot_reschedule_state(session, campaign, now=now)
-    capacity = reschedule.get("capacity")
-    was_at_campaign_cap = settings.get("pause_reason") == "campaign_daily_cap_reached"
-    if capacity is not None and capacity["remaining"] <= 0:
-        campaign.scheduled_at = reschedule["next_at"]
-        settings["pause_reason"] = "campaign_daily_cap_reached"
-    elif was_at_campaign_cap:
-        campaign.scheduled_at = reschedule["next_at"]
-        settings["pause_reason"] = reschedule["pause_reason"]
-    campaign.send_settings = settings
+    if changed:
+        reschedule_after_campaign_edit(session, campaign, now=now)
+    capacity = campaign_daily_capacity(session, campaign, now=now)
     session.commit()
 
     return {
@@ -900,12 +925,14 @@ def post_resume(
     resume_at = campaign.scheduled_at
     if resume_at and resume_at.tzinfo is None:
         resume_at = resume_at.replace(tzinfo=timezone.utc)
-    if not job_ids and mode == "schedule" and resume_at and resume_at > utcnow():
+    if mode == "schedule" and resume_at and resume_at > utcnow():
         campaign.status = "scheduled"
+        for job_id in job_ids:
+            session.get(SendJob, job_id).scheduled_for = resume_at
         session.commit()
         return {
             "status": "scheduled",
-            "queued": 0,
+            "queued": len(job_ids),
             "scheduled_at": campaign.scheduled_at.isoformat(),
             "retried_failed": retried_failed,
         }

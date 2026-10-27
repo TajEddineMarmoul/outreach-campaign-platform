@@ -2,13 +2,14 @@
 
 from collections import Counter, defaultdict
 from datetime import datetime, time
+from math import ceil
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from src.template_engine import contact_context, missing_template_variables
 from .models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, Sender, SenderGroup, SenderGroupMembership, SendJob, SendLog
-from .services import WEEKDAY_NAMES, _aware_utc, campaign_zone, day_bounds_for_zone, user_zone
+from .services import WEEKDAY_NAMES, _aware_utc, campaign_zone, day_bounds_for_zone, evenly_spaced_next_batch_at, user_zone
 from .time import utcnow
 
 
@@ -165,13 +166,15 @@ def daily_campaign_capacity(session: Session, user_id: str, *, now: datetime | N
         members = groups.get(campaign.selected_sender_group_id, [])
         sender_limit = sum(sender.daily_cap for sender in members)
         campaign_limit = None
+        window_start = None
         start, end = current, bounds[campaign.id][1]
         state = "active"
         if mode == "autopilot":
             day = schedules.get((campaign.id, WEEKDAY_NAMES[local.weekday()]))
             if day:
                 campaign_limit = day.daily_cap
-                start = max(start, datetime.combine(local.date(), time.fromisoformat(day.start_time), tzinfo=zone))
+                window_start = datetime.combine(local.date(), time.fromisoformat(day.start_time), tzinfo=zone)
+                start = max(start, window_start)
                 end = datetime.combine(local.date(), time.fromisoformat(day.end_time), tzinfo=zone)
             elif any(key[0] == campaign.id for key in schedules) or WEEKDAY_NAMES[local.weekday()] not in (settings.get("days") or WEEKDAY_NAMES[:5]):
                 campaign_limit = 0
@@ -197,9 +200,18 @@ def daily_campaign_capacity(session: Session, user_id: str, *, now: datetime | N
             max(0, limit - actual[campaign.id]),
         )
         available_seconds = max(0, (end - start).total_seconds())
-        # The worker wakes once per minute; fixed pacing may be slower.
-        delay = 1 if mode == "autopilot" and settings.get("pacing_mode") == "spread_evenly" else max(1, int(settings.get("delay_minutes", 5)))
-        pacing_bound = (int(available_seconds // (delay * 60)) + 1) * len(members)
+        # A partial day has only the slots left at the full-window rate.
+        # The worker wakes once per minute and may reduce the actual throughput.
+        if window_start is not None and campaign_limit and settings.get("pacing_mode") == "spread_evenly":
+            paced_next = evenly_spaced_next_batch_at(
+                current=current, start_at=window_start, end_at=end,
+                daily_target=campaign_limit, batch_size=len(members),
+            )
+            interval = max(60, (paced_next - current).total_seconds())
+            pacing_bound = ceil(available_seconds / interval) * min(len(members), campaign_limit)
+        else:
+            delay = max(1, int(settings.get("delay_minutes", 5)))
+            pacing_bound = (int(available_seconds // (delay * 60)) + 1) * len(members)
         demand[campaign.id] = min(eligible[campaign.id], remaining, pacing_bound) if state == "active" else 0
         items[campaign.id] = {
             "campaign_id": campaign.id, "timezone": zone.key, "date": local.date().isoformat(),

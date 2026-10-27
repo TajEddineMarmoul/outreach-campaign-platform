@@ -66,6 +66,51 @@
   gap: 5%;
   margin-top: 18px;
 }
+.campaign-schedule-grid.is-editing {
+  grid-template-columns: minmax(0, 820px);
+  margin-top: 0;
+}
+.campaign-schedule-grid.is-editing .campaign-schedule-form {
+  padding: 0;
+}
+.campaign-pace-preview {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  border-left: 3px solid var(--campaign-blue);
+  background: #f3f7ff;
+  padding: 16px 20px;
+  margin-bottom: 6px;
+}
+.campaign-pace-preview > svg { flex: none; margin-top: 3px; color: var(--campaign-blue); }
+.campaign-pace-preview strong { display: block; font-size: 19px; font-weight: 600; }
+.campaign-ui .campaign-pace-preview p { color: var(--campaign-muted); font-size: 13px; margin-top: 5px; max-width: 570px; }
+.campaign-fixed-timezone { padding: 10px 0; }
+.campaign-fixed-timezone small { display: block; color: var(--campaign-muted); margin-top: 4px; }
+.campaign-quick-settings {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 18px;
+  border: 1px solid var(--campaign-line);
+  border-radius: 5px;
+  margin-bottom: 20px;
+}
+.campaign-quick-settings > svg { color: var(--campaign-blue); flex: none; }
+.campaign-quick-settings > div { display: grid; }
+.campaign-quick-settings > div span, .campaign-quick-settings > span { color: var(--campaign-muted); font-size: 13px; }
+.campaign-quick-settings > button { margin-left: auto; }
+.campaign-settings-save { display: flex; gap: 18px; align-items: center; border-top: 1px solid var(--campaign-line); padding-top: 20px; margin-top: 24px; max-width: 820px; }
+.campaign-settings-save p, .campaign-senders-settings > p { color: var(--campaign-muted); font-size: 14px; }
+.campaign-senders-settings > p { margin-top: 18px; max-width: 680px; }
+@media (max-width: 600px) {
+  .campaign-quick-settings { flex-wrap: wrap; gap: 12px; }
+  .campaign-quick-settings > span { display: none; }
+  .campaign-settings-save { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .campaign-pace-preview { padding: 14px; }
+  .campaign-pace-preview strong { font-size: 17px; }
+}
 .campaign-schedule-form {
   display: grid;
   grid-template-columns: 1fr 1.18fr;

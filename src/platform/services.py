@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
-from math import ceil
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Iterable
 
@@ -109,7 +108,7 @@ def next_autopilot_run(
         end = _clock(schedule.end_time if schedule else str(settings.get("end_time", "17:00")), time(17, 0))
         start_at = datetime.combine(candidate_date, start, tzinfo=zone)
         end_at = datetime.combine(candidate_date, end, tzinfo=zone)
-        if offset == 0 and start_at <= local_now <= end_at:
+        if offset == 0 and start_at <= local_now < end_at:
             return current
         if start_at > local_now:
             return start_at.astimezone(timezone.utc)
@@ -137,7 +136,7 @@ def autopilot_window_state(session: Session, campaign: Campaign, *, now: datetim
     end = _clock(schedule.end_time if schedule else str(settings.get("end_time", "17:00")), time(17, 0))
     start_at = datetime.combine(local_now.date(), start, tzinfo=zone)
     end_at = datetime.combine(local_now.date(), end, tzinfo=zone)
-    if local_now < start_at or local_now > end_at:
+    if local_now < start_at or local_now >= end_at:
         return {
             "allowed": False,
             "reason_code": "autopilot_outside_window",
@@ -340,18 +339,16 @@ def autopilot_reschedule_state(
 def evenly_spaced_next_batch_at(
     *,
     current: datetime,
+    start_at: datetime,
     end_at: datetime,
-    remaining_emails: int,
+    daily_target: int,
     batch_size: int,
 ) -> datetime:
-    """Place remaining batches evenly inside the rest of a half-open daily window."""
+    """Use the full window to set a steady rate, without catching up missed sends."""
     current_utc = _aware_utc(current)
-    end_utc = _aware_utc(end_at)
-    if remaining_emails <= 0 or end_utc <= current_utc:
-        return current_utc
-    remaining_batches = ceil(remaining_emails / max(batch_size, 1))
-    interval = (end_utc - current_utc) / (remaining_batches + 1)
-    return current_utc + max(interval, timedelta(minutes=1))
+    duration = _aware_utc(end_at) - _aware_utc(start_at)
+    interval = duration * min(max(batch_size, 1), max(daily_target, 1)) / max(daily_target, 1)
+    return current_utc + max(interval, timedelta(seconds=1))
 
 
 def campaign_batch_schedule(
@@ -392,8 +389,9 @@ def campaign_batch_schedule(
         if capacity is not None:
             candidate = evenly_spaced_next_batch_at(
                 current=current,
+                start_at=window["start_at"],
                 end_at=window["end_at"],
-                remaining_emails=capacity["remaining"],
+                daily_target=capacity["cap"],
                 batch_size=batch_size,
             )
 
@@ -405,6 +403,46 @@ def campaign_batch_schedule(
         now=current,
         next_candidate=candidate,
     )
+
+
+def reschedule_after_campaign_edit(
+    session: Session, campaign: Campaign, *, now: datetime | None = None,
+) -> None:
+    """Apply a live edit at the new pace, retaining in-flight work and daily usage."""
+    if campaign.status not in {"autopilot", "sending"}:
+        return
+    current = _aware_utc(now or utcnow())
+    settings = dict(campaign.send_settings or {})
+    next_at = current + timedelta(minutes=max(int(settings.get("delay_minutes", 5)), 0))
+    reason = None
+    if settings.get("mode") == "autopilot":
+        window = autopilot_window_state(session, campaign, now=current)
+        capacity = campaign_daily_capacity(session, campaign, now=current, schedule=window.get("schedule"))
+        # Queued reservations may still send today. Only delivered emails can
+        # exhaust the day when moving those reservations to the new schedule.
+        if capacity is not None and capacity["sent"] >= capacity["cap"]:
+            next_at = next_autopilot_run(session, campaign, now=current, force_next_day=True)
+            reason = "campaign_daily_cap_reached"
+        elif not window["allowed"]:
+            next_at, reason = window["next_at"], window["reason_code"]
+        else:
+            if capacity is not None and settings.get("pacing_mode") == AUTOPILOT_PACING_SPREAD:
+                batch_size = 1
+                if campaign.selected_sender_group_id:
+                    group = require_group(session, campaign.user_id, campaign.selected_sender_group_id)
+                    batch_size = max(len(connected_senders(group)), 1)
+                next_at = evenly_spaced_next_batch_at(
+                    current=current, start_at=window["start_at"], end_at=window["end_at"],
+                    daily_target=capacity["cap"], batch_size=batch_size,
+                )
+            next_at = next_autopilot_run(session, campaign, now=next_at)
+    campaign.scheduled_at = next_at
+    campaign.send_settings = {**settings, "pause_reason": reason}
+    # Never bring an error retry forward, and never alter a claimed send.
+    for job in session.scalars(select(SendJob).where(
+        SendJob.campaign_id == campaign.id, SendJob.status.in_(("queued", "retry")),
+    )):
+        job.scheduled_for = max(_aware_utc(job.scheduled_for), next_at) if job.status == "retry" else next_at
 
 
 def sender_reserved_today(

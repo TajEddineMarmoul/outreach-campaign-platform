@@ -92,6 +92,53 @@ test('an explicitly saved fixed delay remains intact when reopening a campaign',
   assert.equal(schedule.launchRequest(value).body.delay_minutes, 12);
 });
 
+test('live schedule edits exclude launch controls and accept the original past start date', () => {
+  const value = { ...draft, startOnDate: true, scheduledAt: '2020-01-01T12:00' };
+  assert.equal(schedule.scheduleEditingProblem(value), '');
+  const payload = schedule.scheduleEditPayload(value, true);
+  for (const field of ['mode', 'scheduled_at', 'timezone', 'dry_run']) assert.equal(field in payload, false);
+  assert.ok(payload.schedule.monday);
+  assert.equal(payload.pacing_mode, 'spread_evenly');
+  assert.equal(schedule.scheduleEditPayload(value, false).timezone, value.timezone);
+});
+
+test('the rate preview matches a full eight-hour window and accounts for sender batches', () => {
+  const window = { active: true, start: '09:00', end: '17:00', cap: '100' };
+  assert.deepEqual(schedule.sendingPace(window), { batchSize: 1, interval: '4.8 minutes' });
+  assert.deepEqual(schedule.sendingPace(window, 2), { batchSize: 2, interval: '9.6 minutes' });
+  assert.equal(schedule.sendingPace({ ...window, cap: '' }), null);
+  assert.equal(schedule.sendingPace({ ...window, start: '' }), null);
+  assert.equal(schedule.sendingPace({ ...window, cap: '1.5' }), null);
+});
+
+test('only a newly selected resume date is validated and sent when editing a paused schedule', () => {
+  const original = { ...draft, mode: 'schedule', scheduledAt: '2020-01-01T12:00' };
+  assert.equal(schedule.scheduleEditingProblem(original, original), '');
+  assert.equal('scheduled_at' in schedule.scheduleEditPayload(original, false, original), false);
+  const changed = { ...original, scheduledAt: '2020-01-02T12:00' };
+  assert.match(schedule.scheduleEditingProblem(changed, original), /future/);
+  assert.equal(schedule.scheduleEditPayload(changed, false, original).scheduled_at, '2020-01-02T12:00:00');
+});
+
+test('existing campaigns show a focused editable schedule without launch or restart controls', () => {
+  const webRequire = Module.createRequire(path.join(web, 'package.json'));
+  const React = webRequire('react');
+  const { renderToStaticMarkup } = webRequire('react-dom/server');
+  const Component = loadTs('components/campaigns/workspace/CampaignSchedule.tsx', {
+    './scheduleDraft': schedule,
+    '@/lib/timezones': loadTs('lib/timezones.ts'),
+    '@/components/ui/timezone-picker': { TimeZonePicker: () => null },
+  }).default;
+  const markup = renderToStaticMarkup(React.createElement(Component, {
+    draft: { ...draft, days: Object.fromEntries(schedule.DAYS.map(day => [day, { active: true, cap: '100', start: '09:00', end: '17:00' }])) },
+    onChange() {}, recipients: 5000, error: '', onRetry() {}, editing: true, running: true,
+  }));
+  assert.match(markup, /Daily target/);
+  assert.match(markup, /4.8 minutes/);
+  assert.match(markup, /never triggers catch-up sends/);
+  assert.doesNotMatch(markup, /When should emails start|datetime-local|Test mode|How this will run|Next available sending window/);
+});
+
 test('timezone options lead with cities and calculate seasonal and fractional UTC offsets', () => {
   const { timeZoneOption } = loadTs('lib/timezones.ts');
   const summer = new Date('2026-07-01T12:00:00Z');

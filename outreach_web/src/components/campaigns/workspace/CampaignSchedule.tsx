@@ -19,6 +19,7 @@ import {
   DAYS,
   clockLabel,
   scheduleWindowReference,
+  sendingPace,
   type ScheduleDraft,
   type DayWindow,
 } from "./scheduleDraft";
@@ -29,12 +30,18 @@ export default function CampaignSchedule({
   recipients,
   error,
   onRetry,
+  editing = false,
+  running = false,
+  senderCount = 1,
 }: {
   draft: ScheduleDraft;
   onChange: (draft: ScheduleDraft) => void;
   recipients: number;
   error: string;
   onRetry: () => void;
+  editing?: boolean;
+  running?: boolean;
+  senderCount?: number;
 }) {
   const activeDays = DAYS.filter((day) => draft.days[day].active);
   const first = draft.days[activeDays[0] || "monday"];
@@ -63,6 +70,7 @@ export default function CampaignSchedule({
   const zoneCity = draft.timezone.split("/").pop()?.replaceAll("_", " ");
   const viewerCity = viewerZone.split("/").pop()?.replaceAll("_", " ");
   const autopilot = draft.mode === "autopilot";
+  const pace = sendingPace(first, senderCount);
   const patch = (value: Partial<ScheduleDraft>) =>
     onChange({ ...draft, ...value });
   const updateAllDays = (value: Partial<DayWindow>) =>
@@ -88,7 +96,7 @@ export default function CampaignSchedule({
 
   return (
     <>
-      <fieldset className="campaign-delivery-options">
+      {!editing && <fieldset className="campaign-delivery-options">
         <legend>When should emails start?</legend>
         <div>
           {([
@@ -105,18 +113,27 @@ export default function CampaignSchedule({
         <p>
           {autopilot ? "Send gradually on the days and hours you choose." : draft.mode === "schedule" ? "Start at a date and time you choose, then continue until complete." : "Start after you review and launch, then continue until complete."}
         </p>
-      </fieldset>
+      </fieldset>}
       {draft.dryRun && <div className="campaign-notice" role="status">Test mode is on. This campaign will simulate delivery without sending emails. You can change this in More settings.</div>}
-      <div className="campaign-schedule-grid">
+      <div className={`campaign-schedule-grid ${editing ? "is-editing" : ""}`}>
         <div className="campaign-schedule-form">
+          {autopilot && draft.pacing === "spread_evenly" && pace && (
+            <div className="campaign-pace-preview" role="status">
+              <Clock3 size={21} />
+              <div>
+                <strong>{pace.batchSize === 1 ? "1 email" : `Up to ${pace.batchSize} emails`} every {pace.interval}{customized ? ` on ${activeDays[0]}` : ""}</strong>
+                <p>{customized ? "Pace varies by sending day." : "Based on the full sending window."} Starting late or raising the target never triggers catch-up sends.</p>
+              </div>
+            </div>
+          )}
           {draft.mode !== "send_now" && (
           <div className="campaign-field campaign-timezone-field">
             <label htmlFor="campaign-timezone">Campaign timezone</label>
-            <TimeZonePicker
+            {running ? <p className="campaign-fixed-timezone">{draft.timezone}<small>Pause sending to change the timezone.</small></p> : <TimeZonePicker
               id="campaign-timezone"
               value={draft.timezone}
               onChange={(timezone) => patch({ timezone })}
-            />
+            />}
             {conversionWallTime && conversion && viewerZone !== draft.timezone && (
               <p className="campaign-time-conversion">
                 Time reference: {clockLabel(conversionWallTime.slice(11))} in {zoneCity} is{" "}
@@ -127,7 +144,7 @@ export default function CampaignSchedule({
 
           )}
 
-          {draft.mode !== "send_now" && (
+          {!editing && draft.mode !== "send_now" && (
             <div className={`campaign-field campaign-start-field ${!autopilot ? "is-wide" : ""}`}>
               <label htmlFor="campaign-start-mode">{autopilot ? "Start" : "Start date and time"}</label>
               {autopilot && (
@@ -223,7 +240,7 @@ export default function CampaignSchedule({
                     </div>
                   </fieldset>
                   <div className="campaign-field campaign-limit-field">
-                    <label htmlFor="campaign-daily-limit">Daily limit</label>
+                    <label htmlFor="campaign-daily-limit">Daily target</label>
                     <div className="campaign-input-unit">
                       <input
                         id="campaign-daily-limit"
@@ -237,6 +254,7 @@ export default function CampaignSchedule({
                       />
                       <span>emails per day</span>
                     </div>
+                    <p className="campaign-field-hint">Sets the pace for a full window and the maximum per day. A partial day may send fewer.</p>
                   </div>
                 </>
               )}
@@ -303,12 +321,34 @@ export default function CampaignSchedule({
             </>
           ) : null}
 
-          <details className="campaign-advanced-schedule">
+          {(!autopilot || draft.pacing === "fixed_delay") && (
+            <div className="campaign-field">
+              <label htmlFor="campaign-delay">Minutes between batches</label>
+              <input id="campaign-delay" type="number" min="0" max="1440" step="1" value={draft.delay}
+                onInput={(event) => patch({ delay: event.currentTarget.value })} />
+            </div>
+          )}
+          {(autopilot || !running) && <details className="campaign-advanced-schedule">
             <summary>
               <ChevronDown size={18} />
               More settings
             </summary>
             <div>
+              {editing && !running && <>
+                <div className="campaign-field">
+                  <label htmlFor="campaign-edit-mode">Delivery mode</label>
+                  <select id="campaign-edit-mode" value={draft.mode} onChange={(event) => patch({ mode: event.target.value as ScheduleDraft["mode"] })}>
+                    <option value="autopilot">Autopilot · recurring days and hours</option>
+                    <option value="send_now">Continue in batches</option>
+                    <option value="schedule">Continue at a set time</option>
+                  </select>
+                </div>
+                {draft.mode === "schedule" && <div className="campaign-field">
+                  <label htmlFor="campaign-edit-start">Continue at</label>
+                  <input id="campaign-edit-start" type="datetime-local" value={draft.scheduledAt} min={`${today}T00:00`} onChange={(event) => patch({ scheduledAt: event.target.value })} />
+                  <p className="campaign-field-hint">Change this date to reschedule the next send. Sending stays paused until you resume.</p>
+                </div>}
+              </>}
               {autopilot && (
                 <>
                   <label className="campaign-check-field">
@@ -341,42 +381,24 @@ export default function CampaignSchedule({
                         })
                       }
                     >
-                      <option value="spread_evenly">
-                        Spread evenly through the window
+                  <option value="spread_evenly">
+                        Steady pace across the full window
                       </option>
                       <option value="fixed_delay">Wait between batches</option>
                     </select>
                   </div>
                 </>
               )}
-              {(!autopilot || draft.pacing === "fixed_delay") && (
-                <div className="campaign-field">
-                  <label htmlFor="campaign-delay">
-                    Minutes between batches
-                  </label>
-                  <input
-                    id="campaign-delay"
-                    type="number"
-                    min="0"
-                    max="1440"
-                    step="1"
-                    value={draft.delay}
-                    onInput={(event) =>
-                      patch({ delay: event.currentTarget.value })
-                    }
-                  />
-                </div>
-              )}
-              <label className="campaign-check-field">
+              {!running && <label className="campaign-check-field">
                 <input
                   type="checkbox"
                   checked={draft.dryRun}
                   onChange={(event) => patch({ dryRun: event.target.checked })}
                 />
                 Test mode — simulate delivery without sending emails
-              </label>
+              </label>}
             </div>
-          </details>
+          </details>}
           {error && (
             <div role="alert" className="campaign-inline-error">
               <Info size={18} />
@@ -388,7 +410,7 @@ export default function CampaignSchedule({
           )}
         </div>
 
-        <details className="campaign-run-summary">
+        {!editing && <details className="campaign-run-summary">
           <summary><ChevronDown size={16} /> How this will run</summary>
           <ul>
             <li>
@@ -442,7 +464,7 @@ export default function CampaignSchedule({
                 : "You can pause future sends from the campaign page."}
             </span>
           </p>
-        </details>
+        </details>}
       </div>
     </>
   );

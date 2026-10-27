@@ -192,6 +192,48 @@ export function schedulePayload(draft: ScheduleDraft) {
   };
 }
 
+/** A launched campaign's original start date does not block later edits. */
+export function scheduleEditingProblem(draft: ScheduleDraft, original?: ScheduleDraft | null) {
+  if (draft.mode === "schedule" && original &&
+      (original.mode !== draft.mode || original.scheduledAt !== draft.scheduledAt)) return scheduleProblem(draft);
+  return scheduleProblem({
+    ...draft,
+    mode: draft.mode === "schedule" ? "send_now" : draft.mode,
+    startOnDate: false,
+  });
+}
+
+export function scheduleEditPayload(draft: ScheduleDraft, running: boolean, original?: ScheduleDraft | null) {
+  const payload = schedulePayload(draft);
+  const pace = {
+    delay_minutes: payload.delay_minutes,
+    pacing_mode: payload.pacing_mode,
+    ...(draft.mode === "autopilot" ? { schedule: payload.schedule } : {}),
+  };
+  return running ? pace : {
+    ...pace, mode: draft.mode, timezone: payload.timezone, dry_run: payload.dry_run,
+    ...(draft.mode === "schedule" && original &&
+      (original.mode !== draft.mode || original.scheduledAt !== draft.scheduledAt)
+      ? { scheduled_at: payload.scheduled_at } : {}),
+  };
+}
+
+export function sendingPace(window: DayWindow, senderCount = 1) {
+  const minutes = (value: string) => {
+    const [hour, minute] = value.split(":").map(Number);
+    return hour * 60 + minute;
+  };
+  const duration = minutes(window.end) - minutes(window.start);
+  const target = Number(window.cap);
+  if (!Number.isSafeInteger(target) || target < 1 || !Number.isFinite(duration) || duration <= 0) return null;
+  const batchSize = Math.min(Math.max(senderCount, 1), target);
+  const seconds = Math.max(1, duration * 60 * batchSize / target);
+  const interval = seconds < 60
+    ? `${Math.round(seconds)} ${Math.round(seconds) === 1 ? "second" : "seconds"}`
+    : `${Number((seconds / 60).toFixed(1))} ${seconds === 60 ? "minute" : "minutes"}`;
+  return { batchSize, interval };
+}
+
 export function launchRequest(draft: ScheduleDraft, campaignStatus = "draft") {
   // Paused delivery continues through /resume after the edited settings are saved.
   if (campaignStatus === "paused") return { endpoint: "resume", body: {} };

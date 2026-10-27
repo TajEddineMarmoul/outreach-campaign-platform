@@ -51,21 +51,42 @@ default timezone does not rewrite an existing campaign's timezone.
 ### Autopilot limits and pace
 
 New campaign schedules start with Monday–Friday, 9 AM–4:30 PM, a 40-email daily
-limit, and **Spread evenly through the window**. Saved schedules retain their
+target, and **Steady pace across the full window**. Saved schedules retain their
 configured values, including an explicitly chosen fixed delay.
 
 Under **More settings → Delivery pace**, choose:
 
-- **Spread evenly through the window:** calculate the next batch time from the
-  remaining daily allowance, batch size, and time left in the window.
+- **Steady pace across the full window:** calculate the interval from the whole
+  sending window, the daily target, and the batch size. Starting late, resuming,
+  or increasing the target never compresses missed sends into the time left.
+  For example, 100 emails over 9 AM–5 PM means one email every 4.8 minutes with
+  one sender, including when the target changes at 4:45 PM.
 - **Wait between batches:** wait the selected number of minutes after a batch
   completes before scheduling the next one.
 
-Use **Customize each sending day** for different windows or limits by weekday.
+The daily target is also a maximum: emails already sent count toward it. A
+partial day may send fewer. The Today estimate accounts for the remaining time
+at the configured pace.
+
+Use **Customize each sending day** for different windows or targets by weekday.
 Sender limits still apply. If the day's capacity is exhausted, Autopilot waits
 for the next eligible day; immediate or scheduled batch sending can pause.
 Worker availability and sender errors can delay delivery, so the displayed
 minimum number of sending days is an estimate.
+
+### Edit an existing campaign
+
+Open **Audience**, **Message**, **Senders**, or **Schedule** directly. Existing
+campaigns do not return to the launch wizard. **Schedule → Save changes** saves
+the settings while preserving whether the campaign is running or paused.
+
+Autopilot's target, sending days, hours, and pace can change while it runs. The
+new pace applies to future sends. Lowering a target below today's sent count
+waits for the next enabled day. Changing sender groups assigns unclaimed work
+through the new group; emails already sending may finish from the old group.
+
+Use **Pause and edit** for the message or audience. Timezone, delivery mode, and test mode also
+require a pause. Save the changes, then use **Resume sending** when ready.
 
 For API clients: send `pacing_mode: "spread_evenly"` explicitly when starting
 Autopilot. The API's omitted-value default remains `fixed_delay` for compatibility.

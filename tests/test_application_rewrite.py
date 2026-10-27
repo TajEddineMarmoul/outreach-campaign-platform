@@ -3417,11 +3417,16 @@ def test_autopilot_daily_limits_update_live_and_report_capacity(tmp_path):
         ) == 7
         session.close()
 
-        # The dedicated endpoint does not relax the existing live-edit lock.
-        blocked = client.patch(
+        # Pace can also be adjusted without pausing; launch mode stays protected.
+        updated = client.patch(
             f"/api/campaigns/{campaign_id}/send-settings",
             json={"delay_minutes": 1},
             headers=HEADERS,
+        )
+        assert updated.status_code == 200
+        blocked = client.patch(
+            f"/api/campaigns/{campaign_id}/send-settings",
+            json={"mode": "send_now"}, headers=HEADERS,
         )
         assert blocked.status_code == 409
     finally:
