@@ -47,10 +47,29 @@ test('unavailable capacity is never displayed as zero sent or zero capacity', ()
   assert.doesNotMatch(render({ error: true }), /sent|limit|width:/);
 });
 
+test('the headline and bar use the campaign limit of 10 when the sender can send 150', () => {
+  for (const state of ['active', 'window_closed', 'paused']) {
+    const markup = render({ capacity: {
+      ...example, state, sent_today: 7, estimated_total_today: 7,
+      campaign_limit: 10, sender_limit: 150, daily_limit: 150,
+    } });
+    assert.match(markup, /daily limit 10/);
+    assert.match(markup, /<strong>10<\/strong> limit/);
+    assert.match(markup, /class="app-daily-capacity-sent" style="width:70%"/);
+    assert.match(markup, /Sender account limit: 150/);
+    assert.doesNotMatch(markup, /<strong>150<\/strong> limit/);
+  }
+});
+
+test('campaigns without a campaign cap fall back to the account limit', () => {
+  const markup = render({ capacity: { ...example, campaign_limit: null, sender_limit: 150, daily_limit: 150 } });
+  assert.match(markup, /<strong>150<\/strong> limit/);
+});
+
 test('empty and lowered limits cannot produce invalid or negative chart widths', () => {
   for (const capacity of [
-    { ...example, sent_today: 0, estimated_total_today: 0, daily_limit: 0 },
-    { ...example, sent_today: 15, estimated_total_today: 10, daily_limit: 5 },
+    { ...example, sent_today: 0, estimated_total_today: 0, daily_limit: 0, campaign_limit: 0 },
+    { ...example, sent_today: 15, estimated_total_today: 10, daily_limit: 5, campaign_limit: 5 },
   ]) {
     assert.doesNotMatch(render({ capacity }), /NaN|Infinity|width:-/);
   }
@@ -69,7 +88,7 @@ function campaignListMarkup() {
       ['Dialog', 'DialogContent', 'DialogTitle', 'DialogDescription'].map(name => [name, () => null]),
     ),
   });
-  const capacities = [example, { ...example, campaign_id: 2, timezone: 'Europe/Amsterdam', sent_today: 14, estimated_total_today: 30 },
+  const capacities = [{ ...example, campaign_limit: 10, sender_limit: 150, daily_limit: 150 }, { ...example, campaign_id: 2, timezone: 'Europe/Amsterdam', sent_today: 14, estimated_total_today: 30 },
     { ...example, campaign_id: 3, state: 'paused', sent_today: 8, estimated_total_today: 8 }];
   const Page = loadTs('app/campaigns/page.tsx', {
     'next/link': ({ children, ...props }) => React.createElement('a', props, children),
@@ -89,6 +108,7 @@ function campaignListMarkup() {
 
 test('the actual Campaigns page retains delivery progress and adds one compact Today column', () => {
   const markup = campaignListMarkup();
+  assert.match(markup, /<strong>10<\/strong> limit/);
   assert.match(markup, />Delivery<\/th><th[^>]*>Today<\/th><th[^>]*>Updated<\/th>/);
   assert.equal((markup.match(/class="app-daily-capacity"/g) || []).length, 3);
   assert.equal((markup.match(/class="app-delivery-progress"/g) || []).length, 3);

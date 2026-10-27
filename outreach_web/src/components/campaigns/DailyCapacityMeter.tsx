@@ -23,7 +23,7 @@ export default function DailyCapacityMeter({
   }
   const sent = Math.max(0, capacity.sent_today);
   const estimate = Math.max(sent, capacity.estimated_total_today);
-  const limit = Math.max(0, capacity.daily_limit);
+  const limit = Math.max(0, capacity.campaign_limit ?? capacity.daily_limit);
   const scale = Math.max(sent, estimate, limit, 1);
   const sentPercent = (sent / scale) * 100;
   const estimatePercent = (estimate / scale) * 100;
