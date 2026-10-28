@@ -21,9 +21,10 @@ copied into campaigns.
 
 ## Senders
 
-Connect Gmail accounts and choose the campaign's sender group. A batch assigns
-at most one eligible recipient to each eligible connected sender. Account limits
-and temporary error cooldowns can reduce the number of active senders.
+Connect Gmail accounts and choose the campaign's sender group. Each account
+shares one sending clock across all its active campaigns, including campaigns
+using different groups that contain the same account. Account limits and
+temporary error cooldowns still apply.
 
 ## Schedule
 
@@ -56,13 +57,21 @@ configured values, including an explicitly chosen fixed delay.
 
 Under **More settings → Delivery pace**, choose:
 
-- **Steady pace across the full window:** calculate the interval from the whole
-  sending window, the daily target, and the batch size. Starting late, resuming,
+- **Steady pace across the full window:** calculate each account's average rate
+  from the whole sending window, the daily target, and the number of accounts. Starting late, resuming,
   or increasing the target never compresses missed sends into the time left.
   For example, 100 emails over 9 AM–5 PM means one email every 4.8 minutes with
   one sender, including when the target changes at 4:45 PM.
-- **Wait between batches:** wait the selected number of minutes after a batch
-  completes before scheduling the next one.
+- **Wait between batches:** contribute one email per account per configured
+  delay to each account's shared sending clock.
+
+An account adds its active campaign rates to determine the space between emails,
+then divides turns proportionally among those campaigns. For example, a campaign
+sending 10 emails from 10 AM–noon contributes five per hour; one sending 12 from
+11 AM–1 PM contributes six per hour. Their shared account spaces five, eleven,
+and six emails across the three hours. Other accounts run independently.
+There is no fixed 30-second gap or global simultaneous-account setting.
+See [the scheduling model and validation](shared-sender-dispatch.md) for details.
 
 The daily target is also a maximum: emails already sent count toward it. A
 partial day may send fewer. The Today estimate accounts for the remaining time

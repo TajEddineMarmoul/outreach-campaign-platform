@@ -13,17 +13,15 @@ from src.platform.time import utcnow
 
 def enqueue_due_campaign_batches(session: Session, *, limit: int = 25) -> list[dict]:
     now = utcnow()
+    from .shared_dispatch import enabled, sync_campaign
+    query = select(Campaign).where(
+        Campaign.status.in_(("sending", "scheduled", "autopilot")),
+        Campaign.scheduled_at.is_not(None), Campaign.scheduled_at <= now,
+    ).order_by(Campaign.scheduled_at, Campaign.id).limit(limit)
+    if enabled(session, ""):
+        query = query.where(Campaign.shared_dispatch.is_(False))
     campaigns = list(
-        session.scalars(
-            select(Campaign)
-            .where(
-                Campaign.status.in_(("sending", "scheduled", "autopilot")),
-                Campaign.scheduled_at.is_not(None),
-                Campaign.scheduled_at <= now,
-            )
-            .order_by(Campaign.scheduled_at, Campaign.id)
-            .limit(limit)
-        )
+        session.scalars(query)
     )
     results: list[dict] = []
     for campaign in campaigns:
@@ -33,6 +31,10 @@ def enqueue_due_campaign_batches(session: Session, *, limit: int = 25) -> list[d
             select(Campaign).where(Campaign.id == campaign.id).with_for_update()
         )
         if not campaign:
+            continue
+        if enabled(session, campaign.user_id):
+            sync_campaign(session, campaign, now=now)
+            results.append({"campaign_id": campaign.id, "created": 0, "reason": "Coordinated by sender account"})
             continue
         active_jobs = list(
             session.scalars(

@@ -15,6 +15,11 @@ USER = "live-settings-user"
 NOW = datetime(2026, 10, 27, 16, 45, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def legacy_batch_settings_regressions(monkeypatch):
+    monkeypatch.setenv("OUTREACH_SHARED_DISPATCH", "false")
+
+
 def aware(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 

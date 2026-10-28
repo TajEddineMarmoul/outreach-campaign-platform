@@ -33,6 +33,13 @@ USER_ID = "mock_app_user"
 HEADERS = {"Authorization": f"Bearer {USER_ID}"}
 
 
+@pytest.fixture(autouse=True)
+def legacy_delivery_regressions(monkeypatch):
+    # This suite retains the pre-coordinator contract as a rollback regression.
+    # The default-on coordinator has its own end-to-end delivery suite.
+    monkeypatch.setenv("OUTREACH_SHARED_DISPATCH", "false")
+
+
 def all_day_schedule(cap: int = 10) -> dict[str, dict[str, object]]:
     return {
         day: {"cap": cap, "start": "00:00", "end": "23:59"}

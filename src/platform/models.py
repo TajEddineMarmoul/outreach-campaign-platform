@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -111,7 +111,11 @@ class SenderGroupMembership(Base):
 
 class Campaign(Base, TimestampMixin):
     __tablename__ = "campaigns"
-    __table_args__ = (Index("ix_campaigns_user_status", "user_id", "status"),)
+    __table_args__ = (
+        Index("ix_campaigns_user_status", "user_id", "status"),
+        Index("ix_campaigns_dispatch_bootstrap", "shared_dispatch", "status", "id"),
+        Index("ix_campaigns_due", "shared_dispatch", "status", "scheduled_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -127,6 +131,7 @@ class Campaign(Base, TimestampMixin):
     attachment_metadata: Mapped[dict] = mapped_column(MutableDict.as_mutable(json_type()), default=dict, nullable=False)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     engagement_tracking_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    shared_dispatch: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
 
     user: Mapped[User] = relationship(back_populates="campaigns")
     selected_sender_group: Mapped[SenderGroup | None] = relationship(back_populates="campaigns")
@@ -181,7 +186,10 @@ class Contact(Base, TimestampMixin):
 
 class CampaignRecipient(Base, TimestampMixin):
     __tablename__ = "campaign_recipients"
-    __table_args__ = (Index("ix_campaign_recipients_status", "campaign_id", "status"),)
+    __table_args__ = (
+        Index("ix_campaign_recipients_status", "campaign_id", "status"),
+        Index("ix_campaign_recipients_ready", "campaign_id", "status", "created_at", "contact_id"),
+    )
 
     campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True)
     contact_id: Mapped[int] = mapped_column(ForeignKey("contacts.id", ondelete="CASCADE"), primary_key=True)
@@ -199,6 +207,10 @@ class SendJob(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_send_jobs_idempotency_key"),
         Index("ix_send_jobs_due", "status", "scheduled_for"),
+        Index("ix_send_jobs_sender_pending", "sender_id", "campaign_id", "status", "scheduled_for", "id"),
+        Index("ix_send_jobs_sender_reserved", "sender_id", "status", "scheduled_for", "id"),
+        Index("ix_send_jobs_campaign_reserved", "campaign_id", "status", "scheduled_for"),
+        Index("ix_send_jobs_recipient_state", "campaign_id", "recipient_id", "status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -214,11 +226,64 @@ class SendJob(Base, TimestampMixin):
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     batch_id: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(240), nullable=False)
+    dispatch_token: Mapped[str | None] = mapped_column(String(64))
+
+
+class SenderDispatch(Base, TimestampMixin):
+    """One durable clock and one fenced in-flight reservation per Gmail account."""
+    __tablename__ = "sender_dispatch"
+    __table_args__ = (
+        Index("ix_sender_dispatch_due", "next_at", "sender_id"),
+        Index("ix_sender_dispatch_leases", "lease_until", "sender_id"),
+    )
+
+    sender_id: Mapped[int] = mapped_column(ForeignKey("senders.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    active_lanes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    virtual_time: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    credit: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    clock_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    leased_campaign_id: Mapped[int | None] = mapped_column(Integer)
+
+
+class SenderCampaignLane(Base):
+    """An indexed fair-queue entry; no scan of sibling campaigns per send."""
+    __tablename__ = "sender_campaign_lanes"
+    __table_args__ = (
+        Index("ix_sender_lanes_fair", "sender_id", "active", "selectable", "finish_tag", "window_end", "campaign_id"),
+        Index("ix_sender_lanes_transition", "transition_at", "sender_id", "campaign_id"),
+        Index("ix_sender_lanes_sender_transition", "sender_id", "transition_at"),
+        Index("ix_sender_lanes_calendar_transition", "sender_id", "calendar_key", "transition_at"),
+        Index("ix_sender_lanes_campaign", "campaign_id", "sender_id"),
+    )
+
+    sender_id: Mapped[int] = mapped_column(ForeignKey("senders.id", ondelete="CASCADE"), primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    selectable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    finish_tag: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    transition_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    calendar: Mapped[dict] = mapped_column(json_type(), default=dict, nullable=False)
+    calendar_key: Mapped[str] = mapped_column(String(64), default="", server_default="", nullable=False)
 
 
 class SendLog(Base, TimestampMixin):
     __tablename__ = "send_log"
-    __table_args__ = (Index("ix_send_log_user_campaign", "user_id", "campaign_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_send_log_user_campaign", "user_id", "campaign_id", "created_at"),
+        Index("ix_send_log_sender_day", "sender_id", "sent_at", "status"),
+        Index("ix_send_log_campaign_day", "campaign_id", "sent_at", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)

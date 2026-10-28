@@ -201,6 +201,19 @@ def sender_group_filter(group_id: int):
     return or_(Sender.group_id == group_id, Sender.groups.any(SenderGroup.id == group_id))
 
 
+def campaign_sender(session: Session, campaign: Campaign, sender_id: int, *, lock: bool = False) -> Sender | None:
+    """Check one canonical membership without loading or locking its siblings."""
+    if not campaign.selected_sender_group_id:
+        return None
+    query = select(Sender).join(SenderGroup, SenderGroup.id == campaign.selected_sender_group_id).where(
+        Sender.id == sender_id, Sender.user_id == campaign.user_id,
+        SenderGroup.user_id == campaign.user_id, sender_group_filter(campaign.selected_sender_group_id),
+    )
+    if lock:
+        query = query.with_for_update(of=Sender)
+    return session.scalar(query)
+
+
 def connected_senders(group: SenderGroup) -> list[Sender]:
     return sorted(
         [sender for sender in group_senders(group) if sender.status == "connected" and sender.encrypted_oauth_credentials],

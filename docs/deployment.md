@@ -36,6 +36,7 @@ Provider pricing, quotas, and account-specific domains are managed outside this 
 | `OUTREACH_SAFE_LOCAL_MODE=false` | Allow the hosted delivery runtime to process jobs. |
 | `WORKER_TICK_TOKEN` | Secret required in the tick request's `X-Worker-Token` header. |
 | `WORKER_MAX_JOBS` | Jobs processed per tick; defaults to 25 and is clamped to 1–25. |
+| `OUTREACH_SHARED_DISPATCH` | Defaults to `true`: coordinate active campaigns per sender account. `false` selects the legacy worker path for rollback; it is not a user-facing pace control. Apply migration `0018_shared_sender_dispatch` before deploying the coordinator. |
 | `GMAIL_CREDENTIALS_JSON` | Google OAuth client JSON for a serverless API. |
 
 `APP_DATABASE_URL` overrides the ORM connection only. Prefer `DATABASE_URL` for
@@ -128,7 +129,7 @@ python -m alembic heads
 python -m alembic upgrade head
 ```
 
-The latest checked-in revision is `0014_email_engagement`. Query `heads` when preparing
+The latest checked-in revision is `0018_shared_sender_dispatch`. Query `heads` when preparing
 a release instead of using an older release note's target. Restart or redeploy the
 application after upgrading, and verify its health and authenticated pages.
 

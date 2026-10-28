@@ -17,6 +17,11 @@ NOW = datetime(2026, 10, 26, 10, tzinfo=timezone.utc)
 USER = "capacity-user"
 
 
+@pytest.fixture(autouse=True)
+def capacity_is_read_only(monkeypatch):
+    monkeypatch.setenv("OUTREACH_SHARED_DISPATCH", "false")
+
+
 @pytest.fixture
 def session(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'capacity.db'}", connect_args={"check_same_thread": False})

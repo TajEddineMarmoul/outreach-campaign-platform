@@ -121,8 +121,8 @@ export default function CampaignSchedule({
             <div className="campaign-pace-preview" role="status">
               <Clock3 size={21} />
               <div>
-                <strong>{pace.batchSize === 1 ? "1 email" : `Up to ${pace.batchSize} emails`} every {pace.interval}{customized ? ` on ${activeDays[0]}` : ""}</strong>
-                <p>{customized ? "Pace varies by sending day." : "Based on the full sending window."} Starting late or raising the target never triggers catch-up sends.</p>
+                <strong>Average: {pace.batchSize === 1 ? "1 email" : `Up to ${pace.batchSize} emails`} every {pace.interval}{customized ? ` on ${activeDays[0]}` : ""}</strong>
+                <p>{customized ? "Pace varies by sending day." : "Based on the full sending window."} Accounts space their active campaigns together. Starting late or raising the target never triggers catch-up sends.</p>
               </div>
             </div>
           )}

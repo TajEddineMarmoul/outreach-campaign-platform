@@ -14,6 +14,7 @@ from src.platform.migrations import upgrade_database
 from src.platform.models import Campaign, SendJob
 from src.platform.scheduler import enqueue_due_campaign_batches
 from src.platform.time import utcnow
+from src.platform import shared_dispatch
 
 
 logger = logging.getLogger("outreach.worker")
@@ -39,7 +40,10 @@ def recover_stale_jobs(*, stale_after_minutes: int = 10) -> int:
 def claim_next_due_job() -> int | None:
     session = SessionLocal()
     try:
-        job = session.scalar(
+        shared_job = shared_dispatch.claim_job(session, now=utcnow())
+        if shared_job is not None:
+            return shared_job
+        legacy_query = (
             select(SendJob)
             .join(Campaign, Campaign.id == SendJob.campaign_id)
             .where(
@@ -51,7 +55,15 @@ def claim_next_due_job() -> int | None:
             .with_for_update(skip_locked=True)
             .limit(1)
         )
+        if shared_dispatch.enabled(session, ""):
+            legacy_query = legacy_query.where(Campaign.shared_dispatch.is_(False))
+        job = session.scalar(legacy_query)
         if not job:
+            return None
+        campaign = session.get(Campaign, job.campaign_id)
+        if shared_dispatch.enabled(session, campaign.user_id):
+            shared_dispatch.sync_campaign(session, campaign, now=utcnow())
+            session.commit()
             return None
         job.status = "running"
         job.locked_at = utcnow()
@@ -64,6 +76,7 @@ def claim_next_due_job() -> int | None:
 def run_worker_cycle(*, max_jobs: int = 25) -> int:
     session = SessionLocal()
     try:
+        shared_dispatch.maintain(session, now=utcnow())
         enqueue_due_campaign_batches(session)
     except Exception:
         session.rollback()

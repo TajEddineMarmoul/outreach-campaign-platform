@@ -22,14 +22,17 @@ from src.platform.services import (
     autopilot_window_state,
     campaign_batch_schedule,
     campaign_daily_capacity,
+    campaign_sender,
     connected_senders,
     delivery_policy_state,
     eligible_senders,
     group_senders,
     require_group,
     sender_sent_count_today,
+    sender_reserved_today,
 )
 from src.platform.time import utcnow
+from src.platform import shared_dispatch
 from src.template_engine import MissingTemplateVariablesError, missing_template_variables, render_template
 
 
@@ -149,6 +152,10 @@ def _schedule_after_finished_batch(session: Session, job: SendJob, finished_at: 
             "pause_reason": None,
         }
         return
+    if campaign.shared_dispatch and shared_dispatch.enabled(session, campaign.user_id):
+        # The account clock, rather than this campaign's old batch timer,
+        # determines when the next recipient is selected.
+        return
     batch_size = int(
         session.scalar(
             select(func.count())
@@ -220,6 +227,8 @@ def create_send_jobs_for_next_batch(
     campaign_id: int,
     delay_minutes: int = 5,
     scheduled_for: datetime | None = None,
+    sender_id: int | None = None,
+    shared: bool = False,
 ) -> dict:
     campaign = session.scalar(
         select(Campaign)
@@ -234,9 +243,20 @@ def create_send_jobs_for_next_batch(
         raise ValueError("Campaign does not have a sender group selected")
 
     policy_now = utcnow()
-    group = require_group(session, user_id, campaign.selected_sender_group_id)
-    connected = connected_senders(group)
-    senders = eligible_senders(session, group, lock=True, now=policy_now)
+    if shared and sender_id is not None:
+        assigned = campaign_sender(session, campaign, sender_id, lock=True)
+        connected = [assigned] if assigned and assigned.status == "connected" and assigned.encrypted_oauth_credentials else []
+        senders = list(connected)
+        if assigned and (sender_sent_count_today(session, assigned.id, now=policy_now)
+                         + sender_reserved_today(session, assigned, now=policy_now) >= assigned.daily_cap
+                         or (assigned.recent_error_at and policy_now < shared_dispatch._aware_utc(assigned.recent_error_at) + SENDER_ERROR_COOLDOWN)):
+            senders = []
+    else:
+        group = require_group(session, user_id, campaign.selected_sender_group_id)
+        connected = connected_senders(group)
+        senders = eligible_senders(session, group, lock=True, now=policy_now)
+        if sender_id is not None:
+            senders = [sender for sender in senders if sender.id == sender_id]
     if not senders:
         if not connected:
             reason_code = "no_connected_senders"
@@ -281,17 +301,15 @@ def create_send_jobs_for_next_batch(
                 }
             max_to_send = min(max_to_send, remaining_campaign)
 
-    session.execute(
-        update(CampaignRecipient)
-        .where(
-            CampaignRecipient.campaign_id == campaign_id,
-            or_(
-                CampaignRecipient.status.is_(None),
-                func.trim(CampaignRecipient.status) == "",
-            ),
+    if not shared:
+        session.execute(
+            update(CampaignRecipient)
+            .where(
+                CampaignRecipient.campaign_id == campaign_id,
+                or_(CampaignRecipient.status.is_(None), func.trim(CampaignRecipient.status) == ""),
+            )
+            .values(status="approved")
         )
-        .values(status="approved")
-    )
     existing_job = (
         select(SendJob.id)
         .where(
@@ -367,7 +385,7 @@ def create_send_jobs_for_next_batch(
     if created_ids and campaign.status in {"draft", "scheduled"}:
         campaign.status = "sending"
     next_schedule = None
-    if created_ids:
+    if created_ids and not shared:
         next_schedule = campaign_batch_schedule(
             session,
             campaign,
@@ -396,6 +414,8 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
     logger.info("perform_send_job start job_id=%s", job_id)
     session = SessionLocal()
     attempt_log_id: int | None = None
+    reserved_sender_id: int | None = None
+    reserved_token: str | None = None
     try:
         initial_job = session.get(SendJob, job_id)
         if not initial_job:
@@ -411,11 +431,20 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
             logger.info("job %s status=%s campaign=%s sender=%s recipient=%s", job_id, job.status, job.campaign_id, job.sender_id, job.recipient_id)
         if not job:
             return {"status": "missing"}
+        reserved_sender_id, reserved_token = job.sender_id, job.dispatch_token
         if job.status == "sent":
             return {"status": "already_sent"}
         allowed_statuses = {"queued", "retry", "running"} if claimed else {"queued", "retry"}
         if job.status not in allowed_statuses:
             return {"status": job.status}
+
+        if campaign.shared_dispatch and shared_dispatch.enabled(session, campaign.user_id):
+            state = session.get(shared_dispatch.SenderDispatch, job.sender_id)
+            if (not job.dispatch_token or not state or state.lease_token != job.dispatch_token
+                    or not state.lease_until or shared_dispatch._aware_utc(state.lease_until) <= utcnow()):
+                job.status, job.locked_at = "queued", None
+                session.commit()
+                return {"status": "deferred", "reason_code": "shared_sender_wait"}
 
         contact = session.get(Contact, job.recipient_id)
         sender = session.scalar(select(Sender).where(Sender.id == job.sender_id).with_for_update())
@@ -454,11 +483,15 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
             _schedule_after_finished_batch(session, job, utcnow())
             session.commit()
             return {"status": "cancelled", "reason_code": "recipient_ineligible"}
-        try:
-            selected_group = require_group(session, campaign.user_id, campaign.selected_sender_group_id) if campaign.selected_sender_group_id else None
-        except LookupError:
-            selected_group = None
-        if selected_group is None or sender.id not in {member.id for member in group_senders(selected_group)}:
+        if campaign.shared_dispatch and shared_dispatch.enabled(session, campaign.user_id):
+            member_valid = campaign_sender(session, campaign, sender.id) is not None
+        else:
+            try:
+                selected_group = require_group(session, campaign.user_id, campaign.selected_sender_group_id) if campaign.selected_sender_group_id else None
+            except LookupError:
+                selected_group = None
+            member_valid = selected_group is not None and sender.id in {member.id for member in group_senders(selected_group)}
+        if not member_valid:
             # A job claimed before a group edit can become queued again while
             # paused. Reassign that work through the current group on the next
             # scheduler cycle rather than sending from its old account.
@@ -579,13 +612,42 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
         if campaign.engagement_tracking_enabled and not dry_run:
             delivery_body = prepare_tracked_email(session, log, body).body
             session.commit()
+        delivery_service = None if dry_run else gmail_service_for_sender(session, sender)
+        session.commit()
+        if campaign.shared_dispatch and shared_dispatch.enabled(session, campaign.user_id):
+            # Rendering, attachment reads and tracking may take time. Recheck
+            # live settings immediately before the external side effect.
+            session.expire_all()
+            now = utcnow()
+            if campaign.status not in shared_dispatch.ACTIVE:
+                job.status, job.locked_at = "queued", None
+                log.status, log.error_message = "deferred", "Campaign paused before delivery"
+                session.commit()
+                return {"status": "paused", "job_id": job_id}
+            if (campaign_sender(session, campaign, sender.id) is None
+                    or sender.status != "connected" or not sender.encrypted_oauth_credentials):
+                recipient.status = "approved"
+                log.status, log.error_message = "deferred", "Sender group changed before delivery"
+                session.delete(job)
+                session.commit()
+                return {"status": "deferred", "reason_code": "sender_group_changed"}
+            policy = delivery_policy_state(session, campaign, sender, now=now)
+            if not policy["allowed"]:
+                log.status, log.error_message = "deferred", policy["reason"]
+                return _defer_disallowed_job(session, job=job, campaign=campaign, recipient=recipient, policy=policy, now=now)
+            if not shared_dispatch.begin_attempt(session, sender.id, job.dispatch_token, now=now):
+                job.status, job.locked_at = "queued", None
+                log.status, log.error_message = "deferred", "Sending reservation expired before delivery"
+                session.commit()
+                return {"status": "deferred", "reason_code": "shared_sender_wait"}
+            session.commit()
         result = send_fn(
             sender=sender.email,
             recipient=contact.email_normalized,
             subject=subject,
             body=delivery_body,
             attachments=email_attachments,
-            service=None if dry_run else gmail_service_for_sender(session, sender),
+            service=delivery_service,
         )
         now = utcnow()
         log.status = "test_sent" if dry_run else "sent"
@@ -640,4 +702,16 @@ def perform_send_job(job_id: int, *, claimed: bool = False) -> dict:
             session.commit()
         return {"status": "failed", "job_id": job_id, "error": str(exc)}
     finally:
+        try:
+            session.rollback()
+            if reserved_sender_id is not None and reserved_token:
+                sender = session.get(Sender, reserved_sender_id)
+                blocked = (shared_dispatch._aware_utc(sender.recent_error_at) + SENDER_ERROR_COOLDOWN
+                           if sender and sender.recent_error_at else None)
+                shared_dispatch.release_slot(session, reserved_sender_id, reserved_token,
+                                             now=utcnow(), blocked_until=blocked)
+                session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Could not release shared sender reservation for job %s", job_id)
         session.close()

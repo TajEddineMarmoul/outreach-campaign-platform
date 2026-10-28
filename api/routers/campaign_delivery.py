@@ -20,10 +20,11 @@ from api.delivery_safety import require_delivery_enabled
 from src.platform.gmail_activity import sync_selected_gmail_activity
 from src.platform.db import get_session
 from src.platform.jobs import create_send_jobs_for_next_batch, has_unsent_approved_recipients
-from src.platform.models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, EmailTrackingEvent, GmailActivityEvent, SendJob, SendLog, Sender
+from src.platform.models import AutopilotDaySchedule, Campaign, CampaignRecipient, Contact, EmailTrackingEvent, GmailActivityEvent, SendJob, SendLog, Sender, SenderCampaignLane, SenderDispatch
 from src.platform.scheduler import WEEKDAY_NAMES, next_autopilot_run
 from src.platform.services import autopilot_reschedule_state, campaign_daily_capacity, campaign_zone, connected_senders, ensure_user, require_group, reschedule_after_campaign_edit, sender_group_filter, serialize_group, user_zone, validate_timezone_name
 from src.platform.time import utcnow
+from src.platform import shared_dispatch
 from src.platform.worker import recover_stale_jobs, run_worker_cycle
 from src.template_engine import extract_template_variables, missing_template_variables
 
@@ -1261,6 +1262,21 @@ def get_campaign_send_progress(
         now=now,
         schedule=today_schedule,
     )
+    next_batch_at = campaign.scheduled_at
+    shared_sender_pacing = campaign.shared_dispatch and shared_dispatch.enabled(session, user_id)
+    if shared_sender_pacing:
+        candidates = []
+        for next_at, boundary, active, selectable in session.execute(
+            select(SenderDispatch.next_at, SenderCampaignLane.transition_at,
+                   SenderCampaignLane.active, SenderCampaignLane.selectable)
+            .join(SenderCampaignLane, SenderCampaignLane.sender_id == SenderDispatch.sender_id)
+            .where(SenderCampaignLane.campaign_id == campaign.id)
+        ):
+            candidate = next_at if active and selectable and next_at else boundary
+            if candidate:
+                candidates.append(candidate.replace(tzinfo=timezone.utc) if candidate.tzinfo is None else candidate)
+        next_batch_at = min(candidates) if candidates and campaign.status in EDIT_LOCKED_STATUSES else None
+        is_waiting = bool(next_batch_at and next_batch_at > now and not is_running)
     result = {
         "campaign_status": campaign.status,
         "timezone": campaign_zone(session, campaign).key,
@@ -1283,7 +1299,8 @@ def get_campaign_send_progress(
         "is_sending": is_running,
         "is_waiting": is_waiting,
         "current_recipient": current_recipient,
-        "next_batch_at": campaign.scheduled_at.isoformat() if campaign.scheduled_at else None,
+        "next_batch_at": next_batch_at.isoformat() if next_batch_at else None,
+        "shared_sender_pacing": shared_sender_pacing,
         "delay_minutes": int((campaign.send_settings or {}).get("delay_minutes", 0)),
         "pacing_mode": (campaign.send_settings or {}).get("pacing_mode", "fixed_delay"),
         "send_mode": (campaign.send_settings or {}).get("mode", "send_now"),
